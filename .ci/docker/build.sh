@@ -274,13 +274,11 @@ case "$tag" in
   pytorch-linux-jammy-aarch64-py3.10-gcc15)
     ANACONDA_PYTHON_VERSION=3.10
     GCC_VERSION=15
-    ACL=yes
     OPENBLAS=yes
     ;;
   pytorch-linux-jammy-aarch64-py3.10-gcc15-inductor-benchmarks)
     ANACONDA_PYTHON_VERSION=3.10
     GCC_VERSION=15
-    ACL=yes
     OPENBLAS=yes
     INDUCTOR_BENCHMARKS=yes
     ;;
@@ -390,7 +388,6 @@ build_image() {
        --build-arg "TSAN=${TSAN}" \
        --build-arg "XPU_VERSION=${XPU_VERSION}" \
        --build-arg "XPU_DRIVER_TYPE=${XPU_DRIVER_TYPE}" \
-       --build-arg "ACL=${ACL:-}" \
        --build-arg "OPENBLAS=${OPENBLAS:-}" \
        --build-arg "SKIP_SCCACHE_INSTALL=${SKIP_SCCACHE_INSTALL:-}" \
        --build-arg "INSTALL_MINGW=${INSTALL_MINGW:-}" \
