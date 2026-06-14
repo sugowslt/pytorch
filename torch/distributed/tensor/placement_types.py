@@ -1639,7 +1639,7 @@ class _StridedShard(torch._C._distributed.StridedShard):
             num_chunks,
             self.dim,
             new_shard_dim,
-            self.split_factor,
+            self._split_factor_int(),
         )
 
         new_tensor = shard_dim_alltoall(
@@ -1651,7 +1651,7 @@ class _StridedShard(torch._C._distributed.StridedShard):
             num_chunks,
             self.dim,
             new_shard_dim,
-            self.split_factor,
+            self._split_factor_int(),
             my_coordinate[mesh_dim],
         )
 
