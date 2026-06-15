@@ -177,7 +177,8 @@ class BaseListVariable(VariableTracker):
         else:
             raise_type_error(
                 tx,
-                f"list indices must be integers or slices, not {arg.python_type_name()}",
+                f"{self.python_type_name()} indices must be integers or slices, "
+                f"not {arg.python_type_name()}",
             )
 
     def unpack_var_sequence(
