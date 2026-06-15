@@ -1591,21 +1591,14 @@ class VariableBuilder:
                     )
                 )
             else:
-                if isinstance(value, torch.SymBool):
-                    # We need to create an unbacked symint to replace the unbacked symbool.
-                    new_symint = self.tx.output.shape_env.create_unbacked_symint()
-                else:
-                    # TODO (yidi): we need to figure out a way to propagate the guards
-                    # we accumulated when tracing the subggraph to outer shape_env. For normal symints,
-                    # this is automatically done by evaluating the guards once but this
-                    # will cause data-dependent error when we evaluate the outer unbacked symints.
-                    # The test case that triggers this graph break is test_cond_unbacked_symint_closure
-                    unimplemented(
-                        gb_type="Attempted to wrap unbacked SymInt",
-                        context="",
-                        explanation="Unbacked SymInt input is not supported yet.",
-                        hints=[*graph_break_hints.SUPPORTABLE],
-                    )
+                new_symint = self.tx.output.shape_env.create_unbacked_symint()
+                foreign_env = value.node.shape_env
+                if foreign_env is not None:
+                    opt_hint = foreign_env.var_to_hint_override.get(value.node.expr)
+                    if opt_hint is not None:
+                        self.tx.output.shape_env.var_to_hint_override[
+                            new_symint.node.expr
+                        ] = opt_hint
             if new_symint is None:
                 raise AssertionError("new_symint must not be None after wrapping")
             if not isinstance(new_symint, SymInt):

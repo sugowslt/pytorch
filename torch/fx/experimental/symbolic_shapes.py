@@ -2939,6 +2939,33 @@ class ShapeGuardPythonPrinter(_ShapeGuardPrinter, PythonPrinter):
             self._print_cache[expr] = res
             return res
 
+    # Override Max/Min to emit torch.sym_max / torch.sym_min instead of the
+    # builtin max/min. The builtins call __bool__ on a SymBool internally
+    # (e.g. `if a < b:`), which raises GuardOnDataDependentSymNode when an
+    # arg is an unbacked SymInt. torch.sym_max / torch.sym_min dispatch
+    # through __sym_max__ / __sym_min__ on the SymInt and return a SymInt
+    # without going through __bool__. On real tensors at runtime the args
+    # are concrete ints and torch.sym_max falls back to builtins.max.
+    def _print_Max(self, expr: sympy.Expr) -> str:
+        if len(expr.args) < 2:
+            raise AssertionError("Max expects at least two arguments")
+        # pyrefly: ignore [missing-attribute]
+        out = self._print(expr.args[-1])
+        for arg in reversed(expr.args[:-1]):
+            # pyrefly: ignore [missing-attribute]
+            out = f"torch.sym_max({self._print(arg)}, {out})"
+        return out
+
+    def _print_Min(self, expr: sympy.Expr) -> str:
+        if len(expr.args) < 2:
+            raise AssertionError("Min expects at least two arguments")
+        # pyrefly: ignore [missing-attribute]
+        out = self._print(expr.args[-1])
+        for arg in reversed(expr.args[:-1]):
+            # pyrefly: ignore [missing-attribute]
+            out = f"torch.sym_min({self._print(arg)}, {out})"
+        return out
+
 
 @deprecated(
     "`torch.fx.experimental.symbolic_shapes.ShapeGuardPrinter` is deprecated, "
@@ -4909,6 +4936,12 @@ class ShapeEnv:
         # doesn't appear as a dim itself (e.g., size=[u0//2, u0//4]), the
         # relationship between dims is lost — each gets an independent symbol.
         # This is acceptable as this case is rare in practice.
+        # TODO: make `old_to_new` a tracer-global cache (instead of per-call)
+        # so a foreign symbol shared across wraps maps to the same outer
+        # symbol, preserving cross-input and derived-expression relations
+        # (e.g. `t1.shape[0] == t2.shape[0]`, size=[u0//2, u0//4]).
+        # TODO: transfer value ranges from old to new shapeenv, do that also
+        # in wrap literal.
         old_to_new: dict[sympy.Expr, sympy.Expr] = {}
         new_size_exprs: list[sympy.Expr] = []
         for i, old_sz in enumerate(sizes):

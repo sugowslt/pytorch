@@ -6696,6 +6696,45 @@ class TestTransferSymbolsFromForeignShapeEnv(TestCase):
             f"Expected at least 4 unbacked dims but found {unbacked_count}",
         )
 
+    def test_flex_attention_with_unbacked_seq_len(self):
+        """
+        Regression test: flex_attention over fake tensors whose seq_len is an
+        unbacked symint must not raise GuardOnDataDependentSymNode during the
+        shape guard self-check when fed unbacked fake input.
+
+        The contiguous-stride shape guard contains expressions like
+        ``stride[0] == 8 * Max(1, size[2])``. If the python ShapeGuardPrinter
+        lowers ``Max`` to the builtin ``max``, evaluating the guard against
+        fake-tensor inputs triggers ``__bool__`` on a SymBool (``1 < u0``),
+        which raises ``GuardOnDataDependentSymNode``. Lowering to
+        ``torch.sym_max`` keeps the result as a SymInt and avoids the DDE.
+        """
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.nn.attention.flex_attention import BlockMask, flex_attention
+
+        shape_env = ShapeEnv()
+        seq = shape_env.create_unbacked_symint()
+
+        with FakeTensorMode(shape_env=shape_env, allow_non_fake_inputs=True):
+            q = torch.empty((1, 1, seq, 8), device="cpu")
+            k = torch.empty((1, 1, seq, 8), device="cpu")
+            v = torch.empty((1, 1, seq, 8), device="cpu")
+            kv_num_blocks = torch.ones((1, 1, 1), dtype=torch.int32)
+            kv_indices = torch.zeros((1, 1, 1, 1), dtype=torch.int32)
+            block_mask = BlockMask.from_kv_blocks(
+                kv_num_blocks,
+                kv_indices,
+                BLOCK_SIZE=128,
+                seq_lengths=(seq, seq),
+            )
+
+            # Must not raise GuardOnDataDependentSymNode.
+            with (
+                torch.compiler._non_strict_tracing_context(),
+                torch._dynamo.config.patch(force_compile_during_fx_trace=True),
+            ):
+                flex_attention(q, k, v, block_mask=block_mask)
+
 
 if __name__ == "__main__":
     run_tests()
