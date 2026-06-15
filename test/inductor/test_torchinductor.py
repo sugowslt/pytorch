@@ -6034,10 +6034,11 @@ for dtype in (torch.int32, torch.int64):
         )
         _, code = run_and_get_code(torch.compile(fn), *inps)
         code = "".join(code)
-        self.assertNotIn("convolution2d_bwd_weight", code)
-        self.assertNotIn("convolution2d_bwd_input", code)
-        # Sanity check that the lowering ran and fell back to ATEN.
-        self.assertIn("convolution_backward", code)
+        # Without the fix a triton_tem_fused_convolution_backward template
+        # kernel is emitted; with the fix the lowering uses the ATEN extern
+        # fallback instead.
+        self.assertNotIn("triton_tem_fused_convolution_backward", code)
+        self.assertIn("torch.ops.aten.convolution_backward.default(", code)
 
     @skip_if_cpu
     @config.patch(
