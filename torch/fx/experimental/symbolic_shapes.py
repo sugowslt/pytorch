@@ -2728,39 +2728,9 @@ def _eval_is_non_overlapping_and_dense_flat(*args: int) -> int:
     return eval_is_non_overlapping_and_dense(list(args[:dim]), list(args[dim:]))
 
 
-# Guard strings are also user-facing diagnostics.  Keep printing max/min, but
-# evaluate them through symbol-safe helpers so unbacked SymInts do not hit
-# Python builtin truthiness internally.
-def _canonicalize_sympy_number(arg: Any) -> Any:
-    if isinstance(arg, sympy.Integer):
-        return int(arg)
-    if isinstance(arg, (sympy.Float, sympy.Rational)):
-        return float(arg)
-    return arg
-
-
-def _eval_sympy_min_max(fn: Callable[[Int, Int], Int], *args: Int) -> Int:
-    if len(args) < 2:
-        raise TypeError("expected at least 2 arguments")
-    result = _canonicalize_sympy_number(args[0])
-    for arg in args[1:]:
-        result = fn(result, _canonicalize_sympy_number(arg))
-    return result
-
-
-def _eval_sympy_max(*args: Int) -> Int:
-    return _eval_sympy_min_max(torch.sym_max, *args)
-
-
-def _eval_sympy_min(*args: Int) -> Int:
-    return _eval_sympy_min_max(torch.sym_min, *args)
-
-
 SYMPY_INTERP = {
     "IsNonOverlappingAndDenseIndicator": _eval_is_non_overlapping_and_dense_flat,
     "cast_symbool_to_symint_guardless": cast_symbool_to_symint_guardless,
-    "max": _eval_sympy_max,
-    "min": _eval_sympy_min,
     "math": math,
     "torch": torch,
 }
@@ -4925,7 +4895,16 @@ class ShapeEnv:
         source: Source | None = None,
         is_size: bool = False,
         replacements: dict[sympy.Expr, sympy.Expr] | None = None,
+        fresh_for_leftover: bool = True,
     ) -> sympy.Expr:
+        """Rebuild ``value`` in this ShapeEnv by transferring its foreign
+        unbacked symbols.  If after substitution the expression still
+        references symbols this env doesn't own (e.g. backed foreign symbols
+        mixed with unbacked, or anything coming from ``as_strided``), and
+        ``fresh_for_leftover`` is True, replace the whole expression with a
+        fresh local unbacked symbol.  Callers that need a different fallback
+        (e.g. tensor sizes, which want a sourced symbol) should pass
+        ``fresh_for_leftover=False`` and handle leftovers externally."""
         src_shape_env = value.node.shape_env
         if src_shape_env is None:
             return value.node.expr
@@ -4942,27 +4921,29 @@ class ShapeEnv:
                         source=source if expr == old_symbol and not is_size else None,
                         is_size=is_size and expr == old_symbol,
                     )
-        return expr.xreplace(old_to_new)
+        new_expr = expr.xreplace(old_to_new)
+        if fresh_for_leftover and (
+            new_expr.free_symbols - set(old_to_new.values())
+        ):
+            new_expr = self.create_unbacked_symint().node.expr
+        return new_expr
 
     def transfer_unbacked_symint_from_foreign_shape_env(
         self,
         value: SymInt,
         source: Source | None = None,
     ) -> SymInt:
-        """Lift a raw foreign unbacked SymInt as an input in this ShapeEnv."""
-        src_shape_env = value.node.shape_env
+        """Lift a raw foreign unbacked SymInt as an input in this ShapeEnv.
+
+        The helper transfers each foreign unbacked symbol (registering its
+        hint via var_to_hint_override) and falls back to a fresh local
+        unbacked symbol if any foreign symbols cannot be translated.  No
+        hint is passed to create_symintnode here because the expression is
+        always unbacked (create_symintnode would null it out anyway)."""
         new_expr = self._transfer_foreign_unbacked_expr(value, source=source)
         return cast(
             SymInt,
-            self.create_symintnode(
-                new_expr,
-                hint=(
-                    self._foreign_unbacked_hint(src_shape_env, value.node.expr)
-                    if src_shape_env is not None
-                    else None
-                ),
-                source=source,
-            ),
+            self.create_symintnode(new_expr, hint=None, source=source),
         )
 
     def transfer_symbols_from_foreign_shape_env(
@@ -5068,11 +5049,15 @@ class ShapeEnv:
                 old_expr = old_symint.node.expr
                 size_source = TensorPropertySource(source, TensorProperty.SIZE, i)
                 if dynamic_sizes[i] is DimDynamic.UNBACKED:
+                    # Opt out of the helper's fresh-unbacked fallback: for size
+                    # dims we want to fall back to create_symbol so the new
+                    # symbol gets the proper TensorPropertySource attachment.
                     new_expr = self._transfer_foreign_unbacked_expr(
                         old_symint,
                         source=size_source,
                         is_size=True,
                         replacements=old_to_new,
+                        fresh_for_leftover=False,
                     )
                     if new_expr.free_symbols - set(old_to_new.values()):
                         new_expr = self.create_symbol(
@@ -5113,25 +5098,23 @@ class ShapeEnv:
         new_stride_exprs: list[sympy.Expr] = []
         for sd in strides:
             if is_symbolic(sd):
+                # Helper falls back to a fresh unbacked symbol if a stride
+                # references a foreign symbol not in any size dim (e.g. from
+                # as_strided).
                 new_expr = self._transfer_foreign_unbacked_expr(
                     cast(SymInt, sd),
                     replacements=old_to_new,
                 )
-                if new_expr.free_symbols - set(old_to_new.values()):
-                    # Stride references a foreign symbol not in any size dim.
-                    new_expr = self.create_unbacked_symint().node.expr
                 new_stride_exprs.append(new_expr)
             else:
                 new_stride_exprs.append(sympy.Integer(sd))
 
-        # 4. Storage offset.
+        # 4. Storage offset.  Helper handles the leftover-symbol fallback.
         if is_symbolic(storage_offset):
             new_offset_expr = self._transfer_foreign_unbacked_expr(
                 cast(SymInt, storage_offset),
                 replacements=old_to_new,
             )
-            if new_offset_expr.free_symbols - set(old_to_new.values()):
-                new_offset_expr = self.create_unbacked_symint().node.expr
         else:
             new_offset_expr = sympy.Integer(storage_offset)
 
