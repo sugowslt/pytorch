@@ -1,14 +1,26 @@
 """Roofline microbenchmark for the CUPTI monitor's columnar decode.
 
-Measures how fast ``CuptiMonitorBuffer.decode()`` turns a raw CUPTI
-user-defined-record buffer into demuxed ``{kind: {field_id: column}}`` columns --
-the per-buffer work the monitor's worker thread does for every completed buffer.
+Measures how fast a raw CUPTI user-defined-record buffer is turned into demuxed
+``{kind: {field_id: column}}`` columns -- the per-buffer work the monitor does for
+every completed buffer -- for BOTH decoders:
+
+  * ``py``     -- ``CuptiMonitorBuffer.decode()``, the Python/numpy reference
+                  decoder (vectorized strides where possible, per-record walk for
+                  variable-size buffers).
+  * ``native`` -- ``CuptiMonitorDecoder``'s C++ per-(kind, field) byte-column
+                  accumulation (GIL released), via the ``_cupti_monitor.bench_decode``
+                  entry point. This is the path the monitor actually runs off the
+                  training thread; it has no per-record-walk cliff, so it should win
+                  on the variable/mixed-layout buffers where numpy falls back to the
+                  Python walk.
+
 This is the ceiling on how many records/s the monitor can stream off CUPTI before
 the decode (not CUPTI, not the GPU) becomes the bottleneck.
 
-It is pure CPU + numpy: it synthesizes the byte buffer and the captured record
-layout by hand and calls the real ``decode()``, so it needs only a torch build
-with ``torch.profiler._cupti`` -- no GPU, no CUPTI, no libcupti preload.
+It is pure CPU: it synthesizes the byte buffer and the captured record layout by
+hand and calls the real decoders, so it needs only a torch build with
+``torch.profiler._cupti`` -- no GPU, no CUPTI, no libcupti preload. (The ``native``
+column is skipped on a torch build whose ``_cupti_monitor`` lacks ``bench_decode``.)
 
 Three things it reports:
 
@@ -32,9 +44,18 @@ import json
 import time
 from typing import Any
 
+import torch
+
 from torch.profiler._cupti.cupti_python import ActivityKind
 from torch.profiler._cupti.monitor import CuptiMonitorBuffer
 from torch.profiler._cupti.records import Kernel
+
+
+# The native decoder's bench entry point (C++ per-(kind, field) byte-column
+# accumulation, GIL released). Absent on torch builds predating it -> the native
+# column is then skipped.
+_NATIVE = getattr(torch._C._profiler, "_cupti_monitor", None)
+_HAS_NATIVE_BENCH = _NATIVE is not None and hasattr(_NATIVE, "bench_decode")
 
 
 _KERNEL = int(ActivityKind.CONCURRENT_KERNEL)
@@ -121,6 +142,39 @@ def _time_decode(
     }
 
 
+def _metrics(best_per_call: float, valid_size: int, n_records: int) -> dict[str, float]:
+    return {
+        "records_per_s": n_records / best_per_call,
+        "mb_per_s": (valid_size / 1e6) / best_per_call,
+        "ns_per_record": best_per_call / n_records * 1e9,
+        "us_per_buffer": best_per_call * 1e6,
+        "record_size": valid_size // n_records,
+    }
+
+
+def _time_native_decode(
+    addr: int, valid_size: int, layouts: dict, n_records: int, *, iters: int, reps: int
+) -> dict[str, float] | None:
+    """Time the native ``CuptiMonitorDecoder`` accumulation over ``reps`` reps of
+    ``iters`` decodes each (timed in C++, GIL released); report the best rep. Returns
+    None if the native bench entry point isn't in this torch build."""
+    if not _HAS_NATIVE_BENCH:
+        return None
+    record_layouts = [(k, rsz, fields) for k, (rsz, fields) in layouts.items()]
+    best_per_call = float("inf")
+    for _ in range(reps):
+        secs = _NATIVE.bench_decode(addr, valid_size, record_layouts, iters)
+        best_per_call = min(best_per_call, secs / iters)
+    return _metrics(best_per_call, valid_size, n_records)
+
+
+def _print_pair(label: str, py_m: dict, nat_m: dict | None, indent: str = "  ") -> None:
+    print(f"{indent}{label:<34}: py  {_fmt(py_m)}")
+    if nat_m is not None:
+        sp = nat_m["records_per_s"] / py_m["records_per_s"]
+        print(f"{indent}{'':<34}  nat {_fmt(nat_m)}  [{sp:.2f}x py]")
+
+
 # Field selections -> the kernel field-id lists that drive the layout width.
 _PROFILER_NUMERIC = [
     int(Kernel.START),
@@ -170,6 +224,11 @@ def main() -> None:
 
     results: dict[str, Any] = {"roofline": {}, "strategy": {}, "selection": {}}
 
+    if _HAS_NATIVE_BENCH:
+        print("(py = CuptiMonitorBuffer.decode numpy; nat = native CuptiMonitorDecoder)")
+    else:
+        print("(native bench entry point absent in this torch build; py only)")
+
     # --- 1. Roofline: records/s vs records-per-buffer (single kind). Two curves:
     # the vectorized numeric path (shows the small-buffer overhead -> steady-state
     # rise) and the NAME-deref path (the per-record floor the profiler actually pays).
@@ -184,9 +243,12 @@ def main() -> None:
         for n in args.sizes:
             keep, addr, vs = _build_buffer(layouts, [_KERNEL], n)
             m = _time_decode(addr, vs, layouts, n, iters=args.iters, reps=args.reps)
+            nat = _time_native_decode(
+                addr, vs, layouts, n, iters=args.iters, reps=args.reps
+            )
             del keep
-            print(f"    {n:>8} rec/buf : {_fmt(m)}")
-            results["roofline"][label].append({"records": n, **m})
+            _print_pair(f"{n:>8} rec/buf", m, nat, indent="    ")
+            results["roofline"][label].append({"records": n, "py": m, "native": nat})
 
     # --- 2. Decode strategy (at a fixed steady-state size), profiler numeric fields.
     n = 65536
@@ -211,9 +273,10 @@ def main() -> None:
     for name, (layouts, cycle) in strategies.items():
         keep, addr, vs = _build_buffer(layouts, cycle, n)
         m = _time_decode(addr, vs, layouts, n, iters=args.iters, reps=args.reps)
+        nat = _time_native_decode(addr, vs, layouts, n, iters=args.iters, reps=args.reps)
         del keep
-        print(f"  {name:<34}: {_fmt(m)}")
-        results["strategy"][name] = m
+        _print_pair(name, m, nat)
+        results["strategy"][name] = {"py": m, "native": nat}
 
     # --- 3. Field selection (single kind, steady-state size).
     print(f"\n=== Field selection ({n} rec/buf, single kind) ===")
@@ -221,19 +284,33 @@ def main() -> None:
         layouts = {_KERNEL: _layout(fids)}
         keep, addr, vs = _build_buffer(layouts, [_KERNEL], n)
         m = _time_decode(addr, vs, layouts, n, iters=args.iters, reps=args.reps)
+        nat = _time_native_decode(addr, vs, layouts, n, iters=args.iters, reps=args.reps)
         del keep
-        print(f"  {name:<34}: {_fmt(m)}")
-        results["selection"][name] = m
+        _print_pair(name, m, nat)
+        results["selection"][name] = {"py": m, "native": nat}
 
-    # --- Roofline summary: the sustained ceiling for each path.
-    numeric_peak = max(
-        r["records_per_s"] for r in results["roofline"]["profiler numeric"]
-    )
-    name_peak = max(r["records_per_s"] for r in results["roofline"]["profiler + NAME"])
+    # --- Roofline summary: the sustained ceiling for each path/decoder.
+    def _peak(curve: str, which: str) -> float:
+        vals = [
+            r[which]["records_per_s"]
+            for r in results["roofline"][curve]
+            if r.get(which)
+        ]
+        return max(vals) if vals else 0.0
+
+    numeric_peak = _peak("profiler numeric", "py")
+    name_peak = _peak("profiler + NAME", "py")
     print(
-        f"\nSustained decode ceiling: {numeric_peak / 1e6:.1f} M records/s numeric, "
+        f"\nSustained py decode ceiling: {numeric_peak / 1e6:.1f} M records/s numeric, "
         f"{name_peak / 1e6:.1f} M records/s with the NAME deref (the profiler's floor)."
     )
+    if _HAS_NATIVE_BENCH:
+        nat_numeric = _peak("profiler numeric", "native")
+        nat_name = _peak("profiler + NAME", "native")
+        print(
+            f"Sustained native decode ceiling: {nat_numeric / 1e6:.1f} M records/s "
+            f"numeric, {nat_name / 1e6:.1f} M records/s with the NAME deref."
+        )
 
     if args.json:
         with open(args.json, "w") as f:

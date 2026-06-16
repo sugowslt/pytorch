@@ -15,7 +15,7 @@ a no-profiling baseline. Modes:
 
 ``_hw`` variants enable HES (hardware kernel timestamps) before CUDA init.
 
-Ported from ``cupti_monitor_bench.py``. Two API changes:
+Ported from ``cupti_monitor_bench.py``. API changes:
   * ``torch.profiler._cupti_monitor`` -> ``torch.profiler._cupti.monitor``
     (``enable_hes_early`` / ``is_hes_enabled`` are unchanged).
   * the old ``start_collection(output_dir)`` raw-dump-to-disk path is gone -- the
@@ -23,6 +23,15 @@ Ported from ``cupti_monitor_bench.py``. Two API changes:
     registers a no-op observer over the full profiler field selection, so the cost
     it reports is subscription + decode + dispatch (there is no raw-dump mode to
     measure).
+  * the ``cupti_monitor`` backend now exports ASYNCHRONOUSLY. ``start_trace`` /
+    ``stop_trace`` only stamp native-clock window boundaries -- no device sync inside
+    the measured window (the distortion win), so ``active_step`` and
+    ``context_exit_ms`` no longer carry a fence. ``export_chrome_trace`` just
+    registers the output; the deferred flush + merge + write happens in
+    ``prof.wait_for_exports()``. The window modes therefore report ``export_ms`` (the
+    cheap deferred-setup call) and ``wait_exports_ms`` (where the real cost lands)
+    separately; for stock Kineto ``wait_for_exports`` is a no-op and the write is in
+    ``export_ms`` as before.
 
 Run on a host with libcupti >= 13.3 visible to the monitor, e.g.
 ``LD_LIBRARY_PATH=$CONDA_PREFIX/cuda-compat python benchmarks/profiler_benchmark/cupti_monitor_bench.py --mode monitor_window``.
@@ -30,9 +39,11 @@ Run on a host with libcupti >= 13.3 visible to the monitor, e.g.
 
 import argparse
 import json
+import os
 import shutil
 import statistics
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -230,6 +241,7 @@ def run_window(
     warmup_times = []
     exit_times = []
     export_times = []
+    wait_export_times = []
 
     for _ in range(samples):
         temp_root = Path(tempfile.mkdtemp(prefix=f"{mode}_"))
@@ -247,20 +259,105 @@ def run_window(
             active_times.append(time_step(step_fn))
             prof.step()
         finally:
+            # cupti_monitor: stop_trace only stamps the window boundary (no device
+            # sync), so this no longer carries the fence the old sync-drain did.
             t0 = time.perf_counter()
             prof.__exit__(None, None, None)
             exit_times.append((time.perf_counter() - t0) * 1e3)
 
+        # cupti_monitor: export_chrome_trace just registers the output path + captures
+        # the Kineto CPU trace -- the merge + write is deferred. Stock Kineto writes
+        # the gzip here as before.
         t1 = time.perf_counter()
         prof.export_chrome_trace(str(trace_path))
         export_times.append((time.perf_counter() - t1) * 1e3)
+
+        # cupti_monitor: the deferred flush + merge + write lands here (off the
+        # measured window, and callable off the training thread). No-op for stock.
+        t2 = time.perf_counter()
+        prof.wait_for_exports()
+        wait_export_times.append((time.perf_counter() - t2) * 1e3)
+
         shutil.rmtree(temp_root, ignore_errors=True)
 
     return {
         "warmup_step": summarize(warmup_times),
         "active_step": summarize(active_times),
         "context_exit_ms": summarize(exit_times),
-        "export_gzip_ms": summarize(export_times),
+        "export_ms": summarize(export_times),
+        "wait_exports_ms": summarize(wait_export_times),
+    }
+
+
+def run_window_async(step_fn, mode: str, samples: int, post_steps: int):
+    """Full-async export (cupti_monitor backend only): hand the deferred finalize to a
+    background thread and keep 'training' on the main thread, the way l4x's
+    trace_handler does it. Measures what actually costs the training thread now --
+    versus run_window's synchronous ``wait_exports_ms``:
+
+      main_handoff_ms  : main-thread cost of export_chrome_trace (deferred) +
+                         take_pending_cupti_export + spawning the worker -- the only
+                         thing that still blocks the caller.
+      post_window_step : step times WHILE the background finalize runs; should stay
+                         ~= baseline (no hitch) since the finalize is off-thread and
+                         does no flush (it rides the workload's natural delivery).
+      bg_finalize_ms   : wall time of the off-thread join(force=False) (informational;
+                         not on the training thread's critical path).
+    """
+    active_times = []
+    handoff_times = []
+    post_step_times = []
+    bg_finalize_times = []
+
+    for _ in range(samples):
+        temp_root = Path(tempfile.mkdtemp(prefix=f"{mode}_"))
+        trace_path = temp_root / "trace.json.gz"
+        cfg = make_experimental_config(mode)
+        prof = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(wait=0, warmup=1, active=1, repeat=1),
+            experimental_config=cfg,
+        )
+        prof.__enter__()
+        try:
+            time_step(step_fn)  # warmup
+            prof.step()
+            active_times.append(time_step(step_fn))
+            prof.step()
+        finally:
+            prof.__exit__(None, None, None)
+
+        result: dict = {}
+        t0 = time.perf_counter()
+        prof.export_chrome_trace(str(trace_path))  # deferred
+        obs = prof.take_pending_cupti_export()
+
+        def _finalize(obs=obs, result=result):
+            tb = time.perf_counter()
+            if obs is not None:
+                # force=False: no flush -> safe off-thread; relies on the workload's
+                # continuing activity (the post_steps below) covering the window.
+                obs.join(force=False)
+            result["ms"] = (time.perf_counter() - tb) * 1e3
+
+        th = threading.Thread(target=_finalize, daemon=True)
+        th.start()
+        handoff_times.append((time.perf_counter() - t0) * 1e3)
+
+        # "Training" continues on the main thread, unblocked, while the worker
+        # finalizes; its activity is what naturally covers the window boundary.
+        for _ in range(post_steps):
+            post_step_times.append(time_step(step_fn))
+
+        th.join()
+        bg_finalize_times.append(result.get("ms", float("nan")))
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    return {
+        "active_step": summarize(active_times),
+        "main_handoff_ms": summarize(handoff_times),
+        "post_window_step": summarize(post_step_times),
+        "bg_finalize_ms": summarize(bg_finalize_times),
     }
 
 
@@ -278,6 +375,8 @@ def main():
             "stock_window_hw",
             "monitor_window",
             "monitor_window_hw",
+            "monitor_window_async",
+            "monitor_window_async_hw",
         ],
         required=True,
     )
@@ -294,7 +393,19 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--measure-steps", type=int, default=20)
+    parser.add_argument(
+        "--post-steps",
+        type=int,
+        default=40,
+        help="async modes: steps to run on the main thread while the bg finalize runs",
+    )
     args = parser.parse_args()
+
+    if "async" in args.mode:
+        # Short background flush period so the post-window workload's activity is
+        # delivered promptly -> the off-thread join(force=False) covers the window
+        # without a long wait. Must be set before the monitor singleton is created.
+        os.environ.setdefault("TORCH_CUPTI_MONITOR_FLUSH_PERIOD_S", "0.05")
 
     if args.mode.endswith("_hw"):
         cupti_monitor.enable_hes_early()
@@ -329,6 +440,13 @@ def main():
             args.samples,
             args.measure_steps,
             _node_timer_fields(),
+        )
+    elif args.mode.startswith("monitor_window_async"):
+        result["window"] = run_window_async(
+            step_fn,
+            args.mode,
+            args.samples,
+            args.post_steps,
         )
     else:
         result["window"] = run_window(
