@@ -1318,6 +1318,7 @@ class PythonWrapperCodegen(CodeGen):
     def __init__(self):
         super().__init__()
         self._last_stream_cache_key: tuple[int, int, tuple[tuple[int, int], ...]] | None = None
+        self._graph_return_counter: int = 0
         self._pending_input_asserts: dict[str, tuple[str, str]] = {}
         self._pending_alignment_copies: OrderedSet[str] = OrderedSet()
         self._names_iter: Iterator[int] = count()
@@ -1972,6 +1973,9 @@ class PythonWrapperCodegen(CodeGen):
 
     def generate_return(self, output_refs: list[str]) -> None:
         if output_refs:
+            graph_idx = self._graph_return_counter
+            self._graph_return_counter += 1
+
             if config.nan_asserts:
                 self.wrapper_call.writeline(
                     "return_vars = (" + ", ".join(output_refs) + ", )"
@@ -1983,6 +1987,11 @@ class PythonWrapperCodegen(CodeGen):
                 self.wrapper_call.writeline("assert not var.isnan().any().item()")
                 self.wrapper_call.writeline("assert not var.isinf().any().item()")
                 self.wrapper_call.do_unindent(2)
+
+            sync_indices = config.triton.sync_graph_indices
+            if sync_indices is not None and V.graph.device_type in ("cuda", "xpu"):
+                if graph_idx in sync_indices:
+                    self.wrapper_call.writeline(V.graph.device_ops.synchronize())
 
             self.wrapper_call.writeline("return (" + ", ".join(output_refs) + ", )")
         else:
