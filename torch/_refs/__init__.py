@@ -3385,12 +3385,13 @@ def native_group_norm(
         if input.device.type == "cpu"
         else torch.contiguous_format
     )
-    input_ = input.contiguous(memory_format=memory_format)
     weight_ = weight.contiguous() if weight is not None else None
     bias_ = bias.contiguous() if bias is not None else None
 
-    computation_dtype = utils.get_computation_dtype(input_.dtype)
-    input_acc = _maybe_convert_to_dtype(input_, computation_dtype)
+    computation_dtype = utils.get_computation_dtype(input.dtype)
+    input_acc = _maybe_convert_to_dtype(input, computation_dtype).contiguous(
+        memory_format=memory_format
+    )
     # num_channels / num_groups and flattened inner dimension are the reduction axes
     reduction_dims = [2, 3]
     input_reshaped = torch.reshape(
