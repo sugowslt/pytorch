@@ -1,0 +1,125 @@
+name: test-diff
+
+# Compute stage of the "tests added/removed" PR comment (behavior 1 of testintro).
+# Reuses an existing build artifact (no extra build), runs the diff across platforms
+# inside the build container, and uploads the result as a GHA artifact. It posts
+# nothing; the privileged comment is done by test-diff-comment.yml (workflow_run), so
+# no PR-code execution ever holds write permissions.
+
+on:
+  workflow_call:
+    inputs:
+      build-environment:
+        required: true
+        type: string
+        description: Build artifact / environment to reuse (e.g. linux-jammy-py3.10-gcc11).
+      docker-image:
+        required: true
+        type: string
+        description: Docker image to run in (the build's image).
+      runner_prefix:
+        required: false
+        type: string
+        default: ""
+      s3-bucket:
+        required: false
+        type: string
+        default: "gha-artifacts"
+      aws-role-to-assume:
+        required: false
+        type: string
+        default: ""
+      platforms:
+        required: false
+        type: string
+        default: ""
+        description: "Comma-separated testintro platform names (default: all)."
+
+jobs:
+  test-diff:
+    # Only meaningful for PRs; the fleet only runs on fork PRs once a maintainer adds a
+    # ciflow label (trusted context), same as every other build/test job here.
+    if: github.repository_owner == 'pytorch' && github.event_name == 'pull_request'
+    runs-on: ${{ inputs.runner_prefix }}linux.4xlarge
+    timeout-minutes: 30
+    steps:
+      - name: Setup SSH (Click me for login details)
+        uses: pytorch/test-infra/.github/actions/setup-ssh@main
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Linux
+        uses: pytorch/pytorch/.github/actions/setup-linux@main
+        with:
+          # testintro creates git worktrees of the base/head and reads test-file blobs
+          # at both refs; a treeless clone would lazy-fetch per blob and hang. Use a
+          # full checkout (same reason as _docs.yml).
+          checkout-mode: normal
+
+      - name: Login to ECR
+        uses: ./.github/actions/ecr-login
+        with:
+          aws-role-to-assume: ${{ inputs.aws-role-to-assume }}
+
+      - name: Calculate docker image
+        id: calculate-docker-image
+        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
+        with:
+          docker-image-name: ${{ inputs.docker-image }}
+
+      - name: Pull docker image
+        uses: pytorch/test-infra/.github/actions/pull-docker-image@main
+        with:
+          docker-image: ${{ steps.calculate-docker-image.outputs.docker-image }}
+
+      - name: Download build artifacts
+        uses: ./.github/actions/download-build-artifacts
+        with:
+          name: ${{ inputs.build-environment }}
+          s3-bucket: ${{ inputs.s3-bucket }}
+
+      - name: Compute test diff
+        env:
+          DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          TESTINTRO_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -ex
+          container_name=$(docker run \
+            -e PR_NUMBER \
+            -e HEAD_SHA \
+            -e BASE_REF \
+            -e TESTINTRO_PLATFORMS \
+            -e TESTINTRO_OUTPUT=test-diff-result.json \
+            -e TESTINTRO_CACHE=/var/lib/jenkins/workspace/.testintro-cache \
+            -e GITHUB_WORKSPACE=/var/lib/jenkins/workspace \
+            --security-opt seccomp=unconfined \
+            --cap-add=SYS_PTRACE \
+            --tty \
+            --detach \
+            --user jenkins \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            "${DOCKER_IMAGE}"
+          )
+          docker exec -t "${container_name}" bash -c "
+            set -ex
+            sudo chown -R jenkins . && git config --global --add safe.directory '*'
+            pip install \$(echo dist/*.whl)[opt-einsum]
+            python -m tools.testing.introspection.ci_run
+          "
+
+      - name: Chown workspace
+        uses: ./.github/actions/chown-workspace
+        if: always()
+
+      - name: Upload test-diff result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: test-diff-result
+          path: test-diff-result.json
+          if-no-files-found: ignore
+          retention-days: 14
