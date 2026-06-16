@@ -1768,7 +1768,7 @@ class PythonWrapperCodegen(CodeGen):
     def codegen_input_size_and_nan_asserts(self) -> None:
         if config.size_asserts:
             self.codegen_input_size_asserts()
-        if config.nan_asserts or config.runtime_triton_nan_asserts:
+        if config.nan_asserts:
             self.codegen_input_nan_asserts()
 
     # Input size/stride assertions are deferred from the top of call() to just
@@ -1982,7 +1982,7 @@ class PythonWrapperCodegen(CodeGen):
             graph_idx = self._graph_return_counter
             self._graph_return_counter += 1
 
-            if config.nan_asserts or config.runtime_triton_nan_asserts:
+            if config.nan_asserts:
                 self.wrapper_call.writeline(
                     "return_vars = (" + ", ".join(output_refs) + ", )"
                 )
