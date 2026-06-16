@@ -917,6 +917,7 @@ def optim_error_inputs_func_muon(device, dtype):
                 params=[param],
                 kwargs={"adjust_lr_fn": "arbitrary"},
                 desc="unsupported adjust_lr_fn",
+            ),
             error_type=ValueError,
             error_regex="Adjust learning rate function arbitrary is not supported",
             error_on=OptimizerErrorEnum.CONSTRUCTION_ERROR,
