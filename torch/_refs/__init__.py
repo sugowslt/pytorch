@@ -7,10 +7,9 @@ import itertools
 import math
 import operator
 import warnings
-from collections.abc import Callable, Iterable, Sequence
-from enum import Enum
+from collections.abc import Callable, Collection, Iterable, Sequence
 from functools import partial, reduce, singledispatch, wraps
-from typing import Any, cast, Optional, overload, Union
+from typing import Any, cast, overload
 
 import torch
 import torch._prims as prims
@@ -3352,7 +3351,9 @@ def _normalize(
 
 
 # add all specified dimensions
-def _unsqueeze_multiple(x: TensorLikeType, dimensions: list[int]) -> TensorLikeType:
+def _unsqueeze_multiple(
+    x: TensorLikeType, dimensions: Collection[int]
+) -> TensorLikeType:
     for dim in sorted(dimensions):
         x = torch.unsqueeze(x, dim)
     return x
@@ -3385,60 +3386,59 @@ def native_group_norm(
         if input.device.type == "cpu"
         else torch.contiguous_format
     )
-    weight_ = weight.contiguous() if weight is not None else None
-    bias_ = bias.contiguous() if bias is not None else None
-
     computation_dtype = utils.get_computation_dtype(input.dtype)
     input_acc = _maybe_convert_to_dtype(input, computation_dtype).contiguous(
         memory_format=memory_format
     )
+    weight_acc = (
+        _maybe_convert_to_dtype(weight, computation_dtype).contiguous()
+        if weight is not None
+        else None
+    )
+    bias_acc = (
+        _maybe_convert_to_dtype(bias, computation_dtype).contiguous()
+        if bias is not None
+        else None
+    )
+
     # num_channels / num_groups and flattened inner dimension are the reduction axes
-    reduction_dims = [2, 3]
+    reduction_dims = (2, 3)
     input_reshaped = torch.reshape(
         input_acc,
-        [batch_size, num_groups, num_channels // num_groups, flattened_inner_size],
+        (batch_size, num_groups, num_channels // num_groups, flattened_inner_size),
     )
-    reduction_dims = utils.canonicalize_dims(input_reshaped.ndim, reduction_dims)
-    biased_var, mean = torch.var_mean(
-        input_reshaped, dim=reduction_dims, unbiased=False, keepdim=True
-    )
+    biased_var, mean = torch.var_mean(input_reshaped, dim=reduction_dims, correction=0)
     rstd = torch.rsqrt(biased_var + eps)
-    if input.device.type == "cpu" and weight_ is not None:
+
+    w = _unsqueeze_multiple(rstd, reduction_dims)
+    if weight_acc is not None:
         weight_reshaped = torch.reshape(
-            weight_, [1, num_groups, num_channels // num_groups, 1]
+            weight_acc, (1, num_groups, num_channels // num_groups, 1)
         )
-        w = rstd * weight_reshaped
-        b = -mean * w
-        if bias_ is not None:
-            bias_reshaped = torch.reshape(
-                bias_, [1, num_groups, num_channels // num_groups, 1]
-            )
-            b = b + bias_reshaped
-        w = w.contiguous().as_strided([batch_size, num_channels], [num_channels, 1])
-        b = b.contiguous().as_strided([batch_size, num_channels], [num_channels, 1])
-        broadcast_dims = list(range(2, input.ndim))
-        unsqueeze_w = _unsqueeze_multiple(w, broadcast_dims)
-        unsqueeze_b = _unsqueeze_multiple(b, broadcast_dims)
-        out = input_acc * unsqueeze_w + unsqueeze_b
+        w = w * weight_reshaped
     else:
-        out = (input_reshaped - mean) * rstd
-        out = out.view(input.shape)
-        broadcast_dims = [0] + list(range(2, input.ndim))
-        if weight_ is not None:
-            unsqueeze_weight = _unsqueeze_multiple(weight_, broadcast_dims)
-            out = out * unsqueeze_weight
-        if bias_ is not None:
-            unsqueeze_bias = _unsqueeze_multiple(bias_, broadcast_dims)
-            out = out + unsqueeze_bias
+        w = w.broadcast_to(batch_size, num_groups, num_channels // num_groups, 1)
 
-    out = _maybe_convert_to_dtype(out, input.dtype)  # type: ignore[assignment]
-    mean = _maybe_convert_to_dtype(mean, input.dtype)  # type: ignore[assignment]
-    rstd = _maybe_convert_to_dtype(rstd, input.dtype)  # type: ignore[assignment]
+    b = -_unsqueeze_multiple(mean, reduction_dims) * w
+    if bias_acc is not None:
+        bias_reshaped = torch.reshape(
+            bias_acc, (1, num_groups, num_channels // num_groups, 1)
+        )
+        b = b + bias_reshaped
 
-    # remove broadcast dimensions from mean and rstd
-    mean = torch.squeeze(mean, reduction_dims)
-    rstd = torch.squeeze(rstd, reduction_dims)
-    return (out, mean, rstd)
+    w = w.contiguous().as_strided((batch_size, num_channels), (num_channels, 1))
+    b = b.contiguous().as_strided((batch_size, num_channels), (num_channels, 1))
+
+    broadcast_dims = list(range(2, input.ndim))
+    unsqueeze_w = _unsqueeze_multiple(w, broadcast_dims)
+    unsqueeze_b = _unsqueeze_multiple(b, broadcast_dims)
+    out = unsqueeze_w * input_acc + unsqueeze_b
+
+    return (
+        _maybe_convert_to_dtype(out, input.dtype),
+        _maybe_convert_to_dtype(mean, input.dtype),
+        _maybe_convert_to_dtype(rstd, input.dtype),
+    )
 
 
 @register_decomposition(aten.native_layer_norm)

@@ -26881,12 +26881,11 @@ python_ref_db = [
     PythonRefInfo(
         "_refs.native_group_norm",
         skips=(
-            # The torch implementation does not return a view, while the reference does
-            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_python_ref"),
-            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_python_ref_executor"),
-            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_python_ref_torch_fallback"),
+            # MPS variance/rstd calculation produces different results than CPU/CUDA/ref
+            DecorateInfo(unittest.expectedFailure, "TestCommon", "test_python_ref", device_type="mps", dtypes=(torch.float32,)),
         ),
         torch_opinfo_name="native_group_norm",
+        validate_view_consistency=False,
     ),
     PythonRefInfo(
         "_refs.native_layer_norm",
