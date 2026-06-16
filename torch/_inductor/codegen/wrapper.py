@@ -1317,7 +1317,9 @@ class PythonWrapperCodegen(CodeGen):
 
     def __init__(self):
         super().__init__()
-        self._last_stream_cache_key: tuple[int, int, tuple[tuple[int, int], ...]] | None = None
+        self._last_stream_cache_key: (
+            tuple[int, int, tuple[tuple[int, int], ...]] | None
+        ) = None
         self._pending_input_asserts: dict[str, tuple[str, str]] = {}
         self._pending_alignment_copies: OrderedSet[str] = OrderedSet()
         self._names_iter: Iterator[int] = count()
@@ -1765,7 +1767,7 @@ class PythonWrapperCodegen(CodeGen):
     def codegen_input_size_and_nan_asserts(self) -> None:
         if config.size_asserts:
             self.codegen_input_size_asserts()
-        if config.nan_asserts:
+        if config.nan_asserts or config.runtime_triton_nan_asserts:
             self.codegen_input_nan_asserts()
 
     # Input size/stride assertions are deferred from the top of call() to just
@@ -1900,7 +1902,11 @@ class PythonWrapperCodegen(CodeGen):
             )
             if not self.imports.contains(import_line):
                 self.imports.writeline(import_line)
-            cache_key = (device_idx, num_streams, tuple(sorted(stream_idx_to_user_obj_idx.items())))
+            cache_key = (
+                device_idx,
+                num_streams,
+                tuple(sorted(stream_idx_to_user_obj_idx.items())),
+            )
             setup_stream_cache = self._last_stream_cache_key != cache_key
             self._last_stream_cache_key = cache_key
             self.writeline(
@@ -1972,7 +1978,7 @@ class PythonWrapperCodegen(CodeGen):
 
     def generate_return(self, output_refs: list[str]) -> None:
         if output_refs:
-            if config.nan_asserts:
+            if config.nan_asserts or config.runtime_triton_nan_asserts:
                 self.wrapper_call.writeline(
                     "return_vars = (" + ", ".join(output_refs) + ", )"
                 )
