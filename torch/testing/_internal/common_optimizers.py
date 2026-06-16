@@ -890,6 +890,16 @@ def optim_inputs_func_muon(device, dtype=None):
             },
             desc="passing alternative ns_coefficients",
         ),
+        OptimizerInput(
+            params=None,
+            kwargs={"adjust_lr_fn": "match_rms_adamw"},
+            desc="match_rms_adamw lr adjustment",
+        ),
+        OptimizerInput(
+            params=None,
+            kwargs={"adjust_lr_fn": "spectral_unclamped"},
+            desc="spectral_unclamped lr adjustment",
+        ),
     ]
 
 

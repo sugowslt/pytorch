@@ -255,7 +255,7 @@ Muon.__doc__ = (
     and weight decay tuned for AdamW.
 
     Jeremy Bernstein in `Deriving Muon`_ proposes a scaling condition on the spectral norm, which
-    scales the update by :math:`\sqrt{\frac{A}{B}}`. This is similar to the "original" Keller's
+    scales the update by :math:`\sqrt{\frac{A}{B}}`. This is similar to the Keller's "original"
     implementation but removes clamping down to 1.
 
     We provide these options for the learning rate adjustment: "original", which follows Keller's
