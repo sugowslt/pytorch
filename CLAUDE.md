@@ -24,8 +24,8 @@ directory so you don't force a rebuild against the broken state.
 
 # Build
 
-Always check local memory for build configuration (env vars, incremental-build shortcuts, etc.) before running the build, and apply what you find. If nothing applicable is in memory, ask the user.
-All build (both codegen, C++ and python) is done via `pip install -e . -v --no-build-isolation`.
+Always check local memory for build configuration (env vars, incremental-build shortcuts, existing build, etc.) before running the build, and apply what you find. If you can't find an existing config, ask the user.
+All builds (both codegen, C++ and python) are done via `pip install -e . -v --no-build-isolation`.
 You should NEVER run any other command to build PyTorch.
 
 # Testing
