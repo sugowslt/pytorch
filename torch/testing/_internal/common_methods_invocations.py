@@ -9526,6 +9526,15 @@ def sample_inputs_scaled_dot_product_attention(op_info, device, dtype, requires_
 
 
     if op_info.name == "torch.ops.aten._scaled_dot_product_flash_attention_for_cpu":
+        samples.append(
+            SampleInput(
+                make((batch, num_heads, seq_q, head_dim)),
+                make((batch, num_heads, seq_kv, head_dim)),
+                make((batch, num_heads, seq_kv, head_dim)),
+                attn_mask=make_tensor((seq_q, seq_kv), device=device, dtype=dtype, requires_grad=False),
+                is_causal=False,
+                dropout_p=0.0)
+        )
         yield from samples
         return
 
@@ -18193,6 +18202,7 @@ op_db: list[OpInfo] = [
         supports_gradgrad=False,
         supports_fwgrad_bwgrad=False,
         supports_forward_ad=False,
+        supports_scripting=False,
         check_batched_forward_grad=False,
         decorators=[onlyCPU],
         skips=(
