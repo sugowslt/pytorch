@@ -9446,5 +9446,3 @@ def _finalize_spec_wiring(shape_env: ShapeEnv) -> None:
         f"bare-IntVar slot somewhere in the spec. Offending checks:\n"
         + "\n".join(lines)
     )
-
-
