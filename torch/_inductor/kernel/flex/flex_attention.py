@@ -47,7 +47,7 @@ from .flex_flash_attention import (
     _use_flex_flash_attention_backward,
     create_flex_flash_attention_backward_kernel,
     create_flex_flash_attention_kernel,
-    has_unsupported_captured_scalars,
+    has_unsupported_cpu_scalar_tensor_captures,
     is_trivial_mask_graph,
     is_trivial_score_graph,
 )
@@ -94,6 +94,24 @@ def raise_flex_kernel_options_error(
         f"mode='max-autotune-no-cudagraphs' can also fix this by trying more "
         f"FlexAttention configs."
     )
+
+
+def _check_flash_supported_scalar_captures(
+    score_mod_other_buffers,
+    mask_mod_other_buffers,
+    *,
+    backward: bool = False,
+) -> None:
+    if has_unsupported_cpu_scalar_tensor_captures(
+        score_mod_other_buffers, mask_mod_other_buffers
+    ):
+        direction = " backward" if backward else ""
+        raise RuntimeError(
+            f"BACKEND='FLASH' but flash attention{direction} cannot be used: "
+            "NYI: score_mod or mask_mod captures a 0-dim CPU tensor scalar. "
+            "Workarounds: use BACKEND='TRITON' or pass the value as a tensor "
+            "on device instead of capturing a CPU scalar tensor."
+        )
 
 
 @SymbolicGridFn
@@ -208,19 +226,12 @@ def flex_attention(
 
     kernel_options, backend = _sanitize_kernel_options_for_triton(kernel_options)
 
-    # Early check for FLASH backend: detect unsupported captured scalars before
-    # building subgraph buffers (which can trigger unbacked_bindings errors)
+    # Early check for FLASH backend: reject scalar captures that cannot be
+    # represented by flash-attn aux_scalars before building subgraph buffers.
     if backend == "FLASH":
-        if has_unsupported_captured_scalars(
+        _check_flash_supported_scalar_captures(
             score_mod_other_buffers, mask_mod_other_buffers
-        ):
-            raise RuntimeError(
-                "BACKEND='FLASH' but flash attention cannot be used: "
-                "NYI: score_mod or mask_mod captures a dynamic scalar (SymInt/SymFloat). "
-                "The FLASH backend cannot inline symbolic values into the CuteDSL template. "
-                "Workarounds: use BACKEND='TRITON', compile with dynamic=False, or pass the "
-                "value as a tensor on device instead of capturing a Python scalar."
-            )
+        )
 
     if backend == "FLASH":
         score_mod_other_buffers = realize_captures_for_cutedsl(score_mod_other_buffers)
@@ -353,15 +364,14 @@ def flex_attention(
 
     Bq, Hq, seq_len_q, qk_head_dim = query.get_size()
     Bkv, Hkv, seq_len_kv, v_head_dim = value.get_size()
-    assert V.graph.sizevars.evaluate_expr(sympy.Eq(Bq, Bkv) | sympy.Eq(Bkv, 1)), (
-        f"Bq and Bkv must broadcastable. Got Bq={Bq} and Bkv={Bkv}"
-    )
-    assert V.graph.sizevars.evaluate_expr(sympy.Gt(seq_len_q, 0)), (
-        "Query length must be greater than 0"
-    )
-    assert V.graph.sizevars.evaluate_expr(sympy.Gt(seq_len_kv, 0)), (
-        "Key length must be greater than 0"
-    )
+    if not V.graph.sizevars.evaluate_expr(sympy.Eq(Bq, Bkv) | sympy.Eq(Bkv, 1)):
+        raise AssertionError(
+            f"Bq and Bkv must broadcastable. Got Bq={Bq} and Bkv={Bkv}"
+        )
+    if not V.graph.sizevars.evaluate_expr(sympy.Gt(seq_len_q, 0)):
+        raise AssertionError("Query length must be greater than 0")
+    if not V.graph.sizevars.evaluate_expr(sympy.Gt(seq_len_kv, 0)):
+        raise AssertionError("Key length must be greater than 0")
 
     B = Bq
 
@@ -648,10 +658,10 @@ def process_joint_outputs(
     Returns:
         JointOutputResult containing processed buffers and gradients
     """
-    assert isinstance(all_joint_outputs, list)
-    assert all_joint_outputs[0] is not None, (
-        "joint_subgraph_buffer is None - this is a bug!"
-    )
+    if not isinstance(all_joint_outputs, list):
+        raise AssertionError(f"Expected list, got {type(all_joint_outputs)}")
+    if all_joint_outputs[0] is None:
+        raise AssertionError("joint_subgraph_buffer is None - this is a bug!")
 
     joint_buffer = all_joint_outputs[0]
     other_grads = all_joint_outputs[num_placeholders - 1 :]
@@ -663,8 +673,10 @@ def process_joint_outputs(
     def get_out(buf):
         if buf is None:
             return None
-        assert isinstance(buf, ComputedBuffer)
-        assert buf.name is not None
+        if not isinstance(buf, ComputedBuffer):
+            raise AssertionError(f"Expected ComputedBuffer, got {type(buf)}")
+        if buf.name is None:
+            raise AssertionError("ComputedBuffer name must not be None")
         return TensorBox.create(V.graph.get_buffer(buf.name))
 
     grads_out = [get_out(x) for x in other_grads]
@@ -768,12 +780,16 @@ def flex_attention_backward(*args, **kwargs):
     Bq, Hq, seq_len_q, qk_head_dim = query.get_size()
     Bkv, Hkv, seq_len_kv, v_head_dim = value.get_size()
 
-    assert V.graph.sizevars.evaluate_expr(sympy.Eq(Bq, Bkv) | sympy.Eq(Bkv, 1)), (
-        f"Bq and Bkv must broadcastable. Got Bq={Bq} and Bkv={Bkv}"
-    )
+    if not V.graph.sizevars.evaluate_expr(sympy.Eq(Bq, Bkv) | sympy.Eq(Bkv, 1)):
+        raise AssertionError(
+            f"Bq and Bkv must broadcastable. Got Bq={Bq} and Bkv={Bkv}"
+        )
 
     kernel_options, backend = _sanitize_kernel_options_for_triton(kernel_options)
     if backend == "FLASH":
+        _check_flash_supported_scalar_captures(
+            score_mod_other_buffers, mask_mod_other_buffers, backward=True
+        )
         score_mod_other_buffers = realize_captures_for_cutedsl(score_mod_other_buffers)
         mask_mod_other_buffers = realize_captures_for_cutedsl(mask_mod_other_buffers)
 
@@ -891,6 +907,7 @@ def flex_attention_backward(*args, **kwargs):
             else joint_outputs.grad_input,
             score_mod_other_buffers=list(score_mod_other_buffers),
             mask_graph_buffer=mask_graph_buffer if needs_block_mask else None,
+            mask_mod_other_buffers=list(mask_mod_other_buffers),
             q_num_blocks=q_num_blocks if needs_block_mask else None,
             q_indices=q_indices if needs_block_mask else None,
             full_q_num_blocks=full_q_num_blocks if needs_block_mask else None,
@@ -1144,11 +1161,12 @@ def flex_attention_backward(*args, **kwargs):
         grad_key = broadcasted_grad_key
         grad_value = broadcasted_grad_value
     else:
-        assert V.graph.sizevars.evaluate_expr(sympy.Gt(Bq, 1) & sympy.Eq(Bkv, 1)), (
-            f"Bq and Bkv must broadcastable. "
-            f"Got Bq={V.graph.sizevars.evaluate_expr(Bq)} "
-            f"and Bkv={V.graph.sizevars.evaluate_expr(Bkv)}"
-        )
+        if not V.graph.sizevars.evaluate_expr(sympy.Gt(Bq, 1) & sympy.Eq(Bkv, 1)):
+            raise AssertionError(
+                f"Bq and Bkv must broadcastable. "
+                f"Got Bq={V.graph.sizevars.evaluate_expr(Bq)} "
+                f"and Bkv={V.graph.sizevars.evaluate_expr(Bkv)}"
+            )
         grad_key = lowerings[aten.sum](broadcasted_grad_key, axis=0, keepdims=True)
         grad_value = lowerings[aten.sum](broadcasted_grad_value, axis=0, keepdims=True)
 
