@@ -223,7 +223,7 @@ class TestCuptiComms(TestCase):
         # In flight: collective 42 issued (metadata recorded by the plugin/store).
         obs._in_flight = {42: {"func": "AllReduce"}}
 
-        from torch.profiler._cupti.cupti_python import ActivityKind
+        from cupti.cupti import ActivityKind  # pyrefly: ignore[missing-import]
 
         # Poll 1: the start event (corr 100 -> ext 42) lands while the kernel is still
         # in flight. The EXTERNAL_CORRELATION record maps corr 100 -> ext 42.
@@ -282,9 +282,9 @@ class TestCuptiComms(TestCase):
         # observer records the resolved start in its graph in-flight accounting (the
         # collective is outstanding until its kernel completion arrives).
         import numpy as np
+        from cupti.cupti import ActivityKind  # pyrefly: ignore[missing-import]
 
         from torch.profiler._cupti.comms import CommRecordPlugin
-        from torch.profiler._cupti.cupti_python import ActivityKind
         from torch.profiler._cupti.records import CudaEvent
 
         role = (5, frozenset({200, 201}), {"func": "ReduceScatter"})
