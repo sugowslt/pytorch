@@ -234,6 +234,31 @@ class ComboKernelTests(TestCase):
         ).run(code[0])
         self.assertEqual(out_eager, out_compiled)
 
+    @requires_cuda_and_triton
+    @unittest.skipIf(
+        not SM90OrLater or torch.version.hip,
+        "TMA requires SM90 or later (Hopper+), not supported on ROCm",
+    )
+    @torch._inductor.config.patch(
+        {
+            "triton.use_tensor_descriptor": True,
+            "assume_aligned_inputs": True,
+        }
+    )
+    def test_combo_kernel_tma_descriptor_block_name(self):
+        def fn(a, b):
+            return a.sum(dim=-1), b.sum(dim=-1)
+
+        inps = [
+            torch.randn(1024, 128, device=GPU_TYPE),
+            torch.randn(1024, 256, device=GPU_TYPE),
+        ]
+
+        out_eager = fn(*inps)
+        out_compiled, code = run_and_get_code(torch.compile(fn), *inps)
+        torch.testing.assert_close(out_eager, out_compiled, atol=1e-4, rtol=1e-4)
+        FileCheck().check("make_tensor_descriptor").run(code[0])
+
     @requires_gpu_and_triton
     def test_sort_in_combo_kernel_forces_persistent_reduction(self):
         # ops.sort only works under persistent reduction. Combo kernel codegen
@@ -863,11 +888,11 @@ class ComboKernelTests(TestCase):
         }
     )
     def test_combo_kernel_no_bench_carve_out(self):
-        # torch.bucketize triggers carve-out under both gate variants:
+        # torch.bucketize triggers carve-out under all gate variants:
         #   CUDA: pointwise heuristic returns 3 configs (>2) -> carve out
-        #   ROCm: lowering sets AutotuneHint.ONE_ELEMENT_PER_THREAD -> carve out
-        # Simple pointwise (b*2.0, c+1.0) passes both gates -> fuses into combo.
-        # Expect 1 combo + 1 standalone on both backends.
+        #   ROCm/XPU: lowering sets AutotuneHint.ONE_ELEMENT_PER_THREAD -> carve out
+        # Simple pointwise (b*2.0, c+1.0) passes all gates -> fuses into combo.
+        # Expect 1 combo + 1 standalone on all backends.
         def fn(a, b, c, boundaries):
             return torch.bucketize(a, boundaries), b * 2.0, c + 1.0
 
@@ -891,15 +916,86 @@ class ComboKernelTests(TestCase):
     @requires_gpu_and_triton
     @torch._inductor.config.patch(
         {
+            "combo_kernels": True,
+            "combo_kernel_per_subkernel_blocks": True,
+        }
+    )
+    def test_combo_kernel_split_large_reductions(self):
+        # squeezenet1_1 backward (combo regression sum_sum_8bcd6e12dcd4):
+        # two very large reductions (sum over [0,2,3] of [512,64,55,55]) must NOT be
+        # co-fused into one combo kernel -- each is split out (5 kernels, vs 4 if fused).
+        import torch._inductor.inductor_prims
+
+        class Model(torch.nn.Module):
+            def forward(
+                self, getitem_54, arg33_1, arg61_1, full, arg62_1, sp0, sp1, sp2
+            ):
+                full_default = torch.ops.aten.full.default(
+                    [65536, 3025], 0, dtype=torch.float32, device=getitem_54.device
+                )
+                view_default = torch.ops.aten.view.default(getitem_54, sp0)
+                idx = torch.ops.prims._low_memory_max_pool_offsets_to_indices.default(
+                    arg33_1, [3, 3], [55, 55], [2, 2], [0, 0], [1, 1]
+                )
+                view_default_1 = torch.ops.aten.view.default(idx, sp1)
+                scatter_add = torch.ops.aten.scatter_add.default(
+                    full_default, 1, view_default_1, view_default
+                )
+                view_default_2 = torch.ops.aten.view.default(scatter_add, sp2)
+                s0 = torch.ops.aten.slice.Tensor(view_default_2, 1, 0, 64)
+                s1 = torch.ops.aten.slice.Tensor(view_default_2, 1, 64, 128)
+                r0 = torch.ops.aten.sum.dim_IntList(
+                    torch.ops.aten.where.self(arg61_1, full, s1), [0, 2, 3]
+                )
+                r1 = torch.ops.aten.sum.dim_IntList(
+                    torch.ops.aten.where.self(arg62_1, full, s0), [0, 2, 3]
+                )
+                return (r0, r1)
+
+        dev = GPU_TYPE
+        torch.manual_seed(0)
+        inps = (
+            torch.randn(512, 128, 27, 27, device=dev),
+            torch.randint(0, 9, (512, 128, 27, 27), dtype=torch.int8, device=dev),
+            torch.rand(512, 64, 55, 55, device=dev) > 0.5,
+            torch.randn((), device=dev),
+            torch.rand(512, 64, 55, 55, device=dev) > 0.5,
+            [65536, 729],
+            [65536, 729],
+            [512, 128, 55, 55],
+        )
+
+        m = Model()
+        torch._dynamo.reset()
+        torch._inductor.metrics.reset()
+        out_eager = m(*inps)
+        out_compiled = torch.compile(m)(*inps)
+        torch.testing.assert_close(out_eager, out_compiled, rtol=1e-4, atol=1e-4)
+        # Very-large reductions split out instead of co-fused: 5 kernels (4 = the regression).
+        self.assertEqual(torch._inductor.metrics.generated_kernel_count, 5)
+
+    @requires_gpu_and_triton
+    @torch._inductor.config.patch(
+        {
             "combo_kernel_per_subkernel_blocks": True,
         }
     )
     def test_combo_kernel_dynamic_scale_rblock(self):
         # A combo kernel with per-subkernel blocks carries size_hints=None at the
         # autotuner level (per-subkernel hints live in combo_grid_meta), so
-        # _dynamic_scale_rblock used to skip it entirely. A register-heavy,
-        # occupancy-limited combo reduction should now participate in the same
-        # occupancy-driven R0_BLOCK scaling as a standalone reduction.
+        # _dynamic_scale_rblock used to skip it entirely. With this change a combo
+        # reduction participates in the same occupancy-driven R0_BLOCK scaling as a
+        # standalone reduction.
+        #
+        # Whether a given kernel actually trips the occupancy heuristic is hardware
+        # dependent: it compares the compiled register count against
+        # regs_per_multiprocessor // max_threads_per_multi_processor, and
+        # max_threads_per_multi_processor differs across GPUs (2048 on
+        # A100/H100/Blackwell vs 1536 on Ada sm_89). To stay deterministic across
+        # backends, capture the combo-reduction autotuner and drive
+        # _iter_rblock_scale_candidates() with a forced register-bound, single-SM
+        # device profile, so candidate generation exercises the combo plumbing
+        # rather than the runner's actual register usage.
         def fn(a, b, c, d):
             r1 = (a * torch.sigmoid(a) + b).sum(dim=1)
             r2 = (c * torch.sigmoid(c) + d).sum(dim=1)
@@ -911,30 +1007,16 @@ class ComboKernelTests(TestCase):
         from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 
         autotuners: list[CachingAutotuner] = []
-        scaled_candidates = []
         orig_init = CachingAutotuner.__init__
-        orig_iter = CachingAutotuner._iter_rblock_scale_candidates
 
         def capture_init(self, *args, **kwargs):
             orig_init(self, *args, **kwargs)
             if (getattr(self, "inductor_meta", {}) or {}).get("combo_grid_meta"):
                 autotuners.append(self)
 
-        def capture_iter(self):
-            for cfg in orig_iter(self):
-                # combo per-subkernel autotuners carry size_hints=None
-                if self.size_hints is None:
-                    scaled_candidates.append(cfg)
-                yield cfg
-
         with (
             fresh_cache(),  # isolate from cache so a re-run (inherited subclass) recompiles
             patch.object(CachingAutotuner, "__init__", capture_init),
-            patch.object(
-                CachingAutotuner,
-                "_iter_rblock_scale_candidates",
-                capture_iter,
-            ),
         ):
             torch._dynamo.reset()
             out_compiled = torch.compile(fn)(*inps)
@@ -949,14 +1031,39 @@ class ComboKernelTests(TestCase):
             "expected a combo reduction kernel with per-subkernel blocks",
         )
 
+        # _could_rblock_scale gates the production path; combo reductions
+        # (size_hints=None) must now pass it.
+        scalable = [au for au in combo_reductions if au._could_rblock_scale]
         self.assertTrue(
-            any(au._could_rblock_scale for au in combo_reductions),
+            scalable,
             "_could_rblock_scale should be True for a combo reduction",
         )
+
+        # Force a register-bound (per-thread register budget rounds to 0) and
+        # occupancy-limited (single SM) profile so both hardware gates open on any
+        # backend; the remaining gates depend only on the chosen Triton config.
+        scaled_candidates = []
+        for au in scalable:
+            forced_props = au.device_props._replace(
+                multi_processor_count=1,
+                max_threads_per_multi_processor=1 << 30,
+            )
+            with patch.object(au, "device_props", forced_props):
+                scaled_candidates.extend(au._iter_rblock_scale_candidates())
+
         self.assertTrue(
             scaled_candidates,
             "_dynamic_scale_rblock should generate a scaled R0_BLOCK candidate "
             "for the combo reduction",
+        )
+        # Combo reductions emit per-subkernel suffixed blocks (R0_BLOCK_i), not the
+        # bare R0_BLOCK of a standalone reduction.
+        self.assertTrue(
+            any(
+                any(k.startswith("R0_BLOCK_") for k in cfg.kwargs)
+                for cfg in scaled_candidates
+            ),
+            "combo scaled candidate should carry a suffixed R0_BLOCK_i kwarg",
         )
 
 
