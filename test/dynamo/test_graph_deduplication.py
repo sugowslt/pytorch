@@ -82,15 +82,14 @@ class GraphModule(torch.nn.Module):
         l_y_ = L_y_
 
         subgraph_0 = self.subgraph_0
-
-        sin: "f32[10, 20]" = torch.sin(l_y_)
-
         invoke_subgraph = torch.ops.higher_order.invoke_subgraph(subgraph_0, 'subgraph_0', l_x_, l_y_);  invoke_subgraph = None
-        invoke_subgraph_1 = torch.ops.higher_order.invoke_subgraph(subgraph_0, 'subgraph_0', l_x_, l_y_);  l_y_ = None
+        invoke_subgraph_1 = torch.ops.higher_order.invoke_subgraph(subgraph_0, 'subgraph_0', l_x_, l_y_)
 
         getitem: "f32[]" = invoke_subgraph_1[0];  invoke_subgraph_1 = None
 
         mul: "f32[]" = getitem * getitem;  getitem = None
+
+        sin: "f32[10, 20]" = torch.sin(l_y_);  l_y_ = None
 
         invoke_subgraph_2 = torch.ops.higher_order.invoke_subgraph(subgraph_0, 'subgraph_0', l_x_, sin);  subgraph_0 = l_x_ = sin = None
 
@@ -117,8 +116,6 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, primals_1: "f32[10, 10]", primals_2: "f32[10, 20]"):
-        sin: "f32[10, 20]" = torch.ops.aten.sin.default(primals_2)
-
         partitioned_fw_subgraph_0_0 = self.partitioned_fw_subgraph_0_0
 
         invoke_subgraph_5 = torch.ops.higher_order.invoke_subgraph(partitioned_fw_subgraph_0_0, 'partitioned_fw_subgraph_0_0', primals_1, primals_2);  partitioned_fw_subgraph_0_0 = None
@@ -126,6 +123,8 @@ class GraphModule(torch.nn.Module):
         getitem_1: "f32[]" = invoke_subgraph_5[0];  invoke_subgraph_5 = None
 
         mul: "f32[]" = torch.ops.aten.mul.Tensor(getitem_1, getitem_1)
+
+        sin: "f32[10, 20]" = torch.ops.aten.sin.default(primals_2)
 
         partitioned_fw_subgraph_0_1 = self.partitioned_fw_subgraph_0_0
 
