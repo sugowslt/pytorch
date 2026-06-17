@@ -18204,6 +18204,7 @@ op_db: list[OpInfo] = [
         supports_gradgrad=False,
         supports_fwgrad_bwgrad=False,
         supports_forward_ad=False,
+        supports_scripting=False,
         check_batched_forward_grad=False,
         supports_cow_input_no_materialize_forward=False,
         decorators=[onlyCPU],
