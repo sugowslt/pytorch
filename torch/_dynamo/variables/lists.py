@@ -58,11 +58,11 @@ from .functions import UserFunctionVariable
 from .iter import IteratorVariable
 from .object_protocol import (
     generic_richcompare_bool,
-    long_as_ssize_t,
     maybe_get_python_type,
-    number_as_ssize_t,
-    number_index,
     pyindex_check,
+    pylong_as_ssize_t,
+    pynumber_as_ssize_t,
+    pynumber_index,
     type_implements_nb_index,
     vt_is_iterable,
 )
@@ -156,7 +156,7 @@ class BaseListVariable(VariableTracker):
         self, tx: "InstructionTranslatorBase", arg: VariableTracker
     ) -> VariableTracker:
         if pyindex_check(maybe_get_python_type(arg)):
-            index = number_as_ssize_t(tx, arg).as_python_constant()
+            index = pynumber_as_ssize_t(tx, arg).as_python_constant()
             try:
                 return self.items[index]
             except IndexError:
@@ -704,7 +704,7 @@ class RangeVariable(BaseListVariable):
         # range_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/rangeobject.c#L729-L748
         arg_type = maybe_get_python_type(arg)
         if pyindex_check(arg_type):
-            i = number_index(tx, arg)
+            i = pynumber_index(tx, arg)
             return self.apply_index(tx, i.as_python_constant())
         elif pyslice_check(arg):
             if not isinstance(arg, SliceVariable):
@@ -1394,7 +1394,7 @@ class DequeVariable(CommonListMethodsVariable):
         # https://github.com/python/cpython/blob/v3.13.0/Modules/_collectionsmodule.c#L1729-L1736
         if isinstance(maxlen, ConstantVariable) and maxlen.value is None:
             return
-        if long_as_ssize_t(tx, maxlen) < 0:
+        if pylong_as_ssize_t(tx, maxlen) < 0:
             raise_observed_exception(
                 ValueError, tx, args=["maxlen must be non-negative"]
             )
