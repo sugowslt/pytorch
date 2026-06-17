@@ -814,9 +814,9 @@ void cpu_flash_attention_backward(
   // Query (Batch x Q_seq_len  x Num_heads    x Dim_per_head)
   // Key   (Batch x KV_seq_len x KV_num_heads x Dim_per_head)
   // Value (Batch x KV_seq_len x KV_num_heads x Dim_per_head)
-  const at::Tensor query = q.stride(-1) == 1 ? q.transpose(1, 2) : q.transpose(1, 2).contiguous();
-  const at::Tensor key = k.stride(-1) == 1 ? k.transpose(1, 2) : k.transpose(1, 2).contiguous();
-  const at::Tensor value = v.stride(-1) == 1 ? v.transpose(1, 2) : v.transpose(1, 2).contiguous();
+  const at::Tensor query = q.stride(-1) == 1 ? q : q.contiguous();
+  const at::Tensor key = k.stride(-1) == 1 ? k : k.contiguous();
+  const at::Tensor value = v.stride(-1) == 1 ? v : v.contiguous();
 
   accum_t scaling_factor =
       sdp::calculate_scale(query, scale).expect_float();
