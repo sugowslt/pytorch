@@ -9,6 +9,7 @@ of make_fx depending on the dynamo export module).
 from __future__ import annotations
 
 import inspect
+from itertools import zip_longest
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -72,8 +73,7 @@ def _walk_spec(
                 f"sequence length {len(arg_value)}"
             )
         out: list[IntermediateSpec | None] = []
-        for i, value in enumerate(arg_value):
-            sub_spec = entries[i] if i < len(entries) else None
+        for i, (value, sub_spec) in enumerate(zip_longest(arg_value, entries)):
             out += _walk_spec(sub_spec, value, where=f"{where}[{i}]")
         return out
 
@@ -85,9 +85,9 @@ def _walk_spec(
         unmatched = set(user_spec) - set(arg_value)
         if unmatched:
             raise ValueError(
-                f"{where}: DictSpec has entries {sorted(unmatched)!r} "
+                f"{where}: DictSpec has entries {sorted(unmatched, key=repr)!r} "
                 f"that do not match any key in the runtime dict. "
-                f"Runtime keys: {sorted(arg_value.keys())!r}"
+                f"Runtime keys: {sorted(arg_value.keys(), key=repr)!r}"
             )
         # Walk runtime ordering so positions align with pytree.tree_flatten
         # (insertion order for plain dicts).
