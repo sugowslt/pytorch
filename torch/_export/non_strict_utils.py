@@ -516,17 +516,50 @@ def make_fake_inputs(
             from torch.fx.experimental._spec_binding import _bind_spec_to_args
             from torch.fx.experimental.dynamic_spec import (
                 _coerce_to_shapes_spec,
+                IntVar,
                 ShapesSpec,
             )
             from torch.fx.experimental.symbolic_shapes import (
-                _fakify_one_leaf_with_spec,
                 _finalize_spec_wiring,
+                _symbolic_context_from_shapes_spec,
                 _wire_spec_assumptions,
+                _wire_spec_slot,
+                _wire_tensor_spec_dims,
             )
 
+            def _fakify_one_leaf(x: Any, source: Source, leaf_spec: Any) -> Any:
+                """Fakify a single flat input leaf against its (already-bound)
+                spec. Spec-declared dims/scalars become unbacked symbols
+                (sound; no 0/1 or size>=2 assumptions); undeclared
+                leaves stay static.
+                """
+                if isinstance(x, torch.Tensor):
+                    if leaf_spec is None:
+                        return fake_mode.from_tensor(
+                            x, static_shapes=True, source=source
+                        )
+                    ctx = _symbolic_context_from_shapes_spec(
+                        x, source, leaf_spec, None, {}
+                    )
+                    fake_x = fake_mode.from_tensor(
+                        x,
+                        static_shapes=False,
+                        source=source,
+                        symbolic_context=ctx,
+                    )
+                    _wire_tensor_spec_dims(leaf_spec, fake_x)
+                    return fake_x
+                # NB: don't match on bools.
+                if type(x) is int and isinstance(
+                    leaf_spec, (IntVar, torch.SymInt)
+                ):
+                    sym_node = shape_env.create_unbacked_symint(source=source)
+                    _wire_spec_slot(leaf_spec, sym_node)
+                    return sym_node
+                return x
+
             # Spec-driven fakification: declared dims/scalars become unbacked
-            # symbols (sound; no constraints/equalities). Mirrors make_fx's
-            # _convert_args_to_fake; non-strict supplies keypath sources.
+            # symbols (sound; no constraints/equalities).
             user_spec = _coerce_to_shapes_spec(dynamic_shapes)
             shape_env = fake_mode.shape_env
             # Wire assumptions BEFORE processing inputs so derived / assumption
@@ -544,13 +577,7 @@ def make_fake_inputs(
 
             with shape_env.ignore_fresh_unbacked_symbols():
                 fake_leaves = [
-                    _fakify_one_leaf_with_spec(
-                        fake_mode,
-                        x,
-                        leaf_sources[i],
-                        leaf_specs[i],
-                        symbolic_unspecced_int=False,
-                    )
+                    _fakify_one_leaf(x, leaf_sources[i], leaf_specs[i])
                     for i, x in enumerate(flat_args)
                 ]
 
