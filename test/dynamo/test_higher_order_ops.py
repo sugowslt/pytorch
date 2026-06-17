@@ -3933,6 +3933,14 @@ class GraphModule(torch.nn.Module):
 """,
         )
 
+    def test_hessian_with_default_device(self):
+        def wrapper_fn(x):
+            return torch.func.hessian(torch.sin)(x)
+
+        x = torch.randn(4, 3)
+        with torch.device("cpu"):
+            self._compile_check(wrapper_fn, (x,))
+
     def test_hessian_argnums(self):
         counters.clear()
 
@@ -5568,9 +5576,11 @@ class GraphModule(torch.nn.Module):
 
         _unpack_dual = torch._functorch.predispatch._unpack_dual(sum_1, level = 0);  sum_1 = None
         getitem: "f32[]" = _unpack_dual[0]
-        getitem_1: "f32[]" = _unpack_dual[1];  _unpack_dual = None
 
         _unwrap_for_grad: "f32[]" = torch._functorch.predispatch._unwrap_for_grad(getitem, 1);  getitem = None
+
+        getitem_1: "f32[]" = _unpack_dual[1];  _unpack_dual = None
+
         _unwrap_for_grad_1: "f32[]" = torch._functorch.predispatch._unwrap_for_grad(getitem_1, 1);  getitem_1 = None
 
         _exit_dual_level = torch._functorch.predispatch._exit_dual_level(level = 0);  _exit_dual_level = None
@@ -5735,9 +5745,11 @@ class GraphModule(torch.nn.Module):
 
         _unpack_dual = torch._functorch.predispatch._unpack_dual(sum_1, level = 0);  sum_1 = None
         getitem: "f32[]" = _unpack_dual[0]
-        getitem_1: "f32[]" = _unpack_dual[1];  _unpack_dual = None
 
         _unwrap_for_grad: "f32[]" = torch._functorch.predispatch._unwrap_for_grad(getitem, 1);  getitem = None
+
+        getitem_1: "f32[]" = _unpack_dual[1];  _unpack_dual = None
+
         _unwrap_for_grad_1: "f32[]" = torch._functorch.predispatch._unwrap_for_grad(getitem_1, 1);  getitem_1 = None
 
         _exit_dual_level = torch._functorch.predispatch._exit_dual_level(level = 0);  _exit_dual_level = None

@@ -371,13 +371,13 @@ class GraphModule(torch.nn.Module):
         l_tensors_1_ = L_tensors_1_
         l_weight_ = L_weight_
 
-        sub: "f32[]" = 1.0 - l_weight_
-        neg: "f32[]" = -sub;  sub = None
         _foreach_sub = torch._foreach_sub([l_end_tensors_0_, l_end_tensors_1_], [l_tensors_0_, l_tensors_1_])
-        getitem: "f32[4]" = _foreach_sub[0]
-        getitem_1: "f32[4]" = _foreach_sub[1];  _foreach_sub = None
         abs_1: "f32[]" = l_weight_.abs()
         mask: "b8[]" = abs_1 >= 0.5;  abs_1 = None
+        getitem: "f32[4]" = _foreach_sub[0]
+        getitem_1: "f32[4]" = _foreach_sub[1];  _foreach_sub = None
+        sub: "f32[]" = 1.0 - l_weight_
+        neg: "f32[]" = -sub;  sub = None
         where: "f32[4]" = torch.where(mask, l_end_tensors_0_, l_tensors_0_);  l_end_tensors_0_ = None
         where_1: "f32[4]" = torch.where(mask, l_end_tensors_1_, l_tensors_1_);  l_end_tensors_1_ = None
         where_2: "f32[]" = torch.where(mask, neg, l_weight_);  mask = neg = l_weight_ = None
