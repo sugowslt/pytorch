@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable  # noqa: TC003
+from typing import Any
 
 from torch.profiler._cupti.comms.plugin import CommRecordPlugin
 

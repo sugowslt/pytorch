@@ -141,7 +141,7 @@ class _CollectiveKernelScope:
         self._entry_roots: set[int] | None = None
         self.tools_ids: list[int] = []
 
-    def __enter__(self) -> "_CollectiveKernelScope":
+    def __enter__(self) -> _CollectiveKernelScope:  # noqa: PYI034
         if not HAVE_NODE_TOOLS_ID:
             return self
         state = _capture_state(self._stream_handle)
@@ -228,7 +228,6 @@ class _GraphCommAnchor:
         if not self._pending:
             return
         import torch
-
         from torch.profiler._cupti.cupti_python import ActivityKind
         from torch.profiler._cupti.records import CudaEvent
         from torch.profiler._cupti.utils.graph_side_stream import eager_record
@@ -473,7 +472,9 @@ class CommMonitorHook:
         comm.register_pre_hook(functools.partial(self._pre_hook, pg))
         comm.register_post_hook(self._post_hook)
 
-    def _pre_hook(self, pg: dict[str, Any], op_name: Any, op_id: int, args: Any) -> None:
+    def _pre_hook(
+        self, pg: dict[str, Any], op_name: Any, op_id: int, args: Any
+    ) -> None:
         monitor = self._monitor
         if monitor is None:
             return

@@ -53,8 +53,9 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from torch.profiler._cupti.cupti_python import ActivityKind
 from torch.profiler._cupti.observers.base import CuptiMonitorObserver
@@ -159,7 +160,7 @@ class CommsObserver(CuptiMonitorObserver):
         max_records: int = 1024,
         start_events: bool = False,
         event_resolver: Callable[
-            [int], "tuple[int, frozenset[int], dict[str, Any]] | None"
+            [int], tuple[int, frozenset[int], dict[str, Any]] | None
         ]
         | None = None,
         quiescence_timeout_s: float | None = None,
@@ -342,14 +343,14 @@ class CommsObserver(CuptiMonitorObserver):
 
     def set_event_resolver(
         self,
-        fn: Callable[[int], "tuple[int, frozenset[int], dict[str, Any]] | None"],
+        fn: Callable[[int], tuple[int, frozenset[int], dict[str, Any]] | None],
     ) -> None:
         """Set the graph start-event resolver (``event_id -> (coll_id, {graph_node_id},
         metadata)``). The anchor's resolver is only populated after capture/finalize, so
         a caller that built the observer before then wires it here."""
         self._event_resolver = fn
 
-    def set_metadata_resolver(self, fn: Callable[[int], "str | None"]) -> None:
+    def set_metadata_resolver(self, fn: Callable[[int], str | None]) -> None:
         """Set the ``graph_node_id -> blob`` resolver used to attach metadata to graph
         collectives' on_end (E). Like the event resolver, the anchor populates it only
         after capture/finalize, so a caller that built the observer before then wires it

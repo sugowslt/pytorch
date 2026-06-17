@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from torch.profiler._cupti.observers.comms import CommRecord
+from torch.profiler._cupti.observers.comms import CommRecord  # noqa: TC001
 
 
 class CommRecordPlugin:

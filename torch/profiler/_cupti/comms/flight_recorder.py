@@ -10,10 +10,11 @@ from __future__ import annotations
 import collections
 import json
 import threading
-from typing import Any, Callable
+from collections.abc import Callable  # noqa: TC003
+from typing import Any
 
 from torch.profiler._cupti.comms.plugin import CommRecordPlugin
-from torch.profiler._cupti.observers.comms import CommRecord
+from torch.profiler._cupti.observers.comms import CommRecord  # noqa: TC001
 
 
 # NCCL profiler func name -> torch.distributed.flight_recorder op name. The
