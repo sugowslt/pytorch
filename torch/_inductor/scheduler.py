@@ -2752,7 +2752,7 @@ class FusedSchedulerNode(BaseSchedulerNode):
 
         if not new_order:
             loop_ordering_log.debug(
-                "Dont reordering fused node %s because we can not decide the suitable loop order",
+                "Don't reordering fused node %s because we can not decide the suitable loop order",
                 self.get_name(),
             )
             return False
@@ -4135,6 +4135,10 @@ class Scheduler:
     def __init__(self, nodes: list[ir.Operation]) -> None:
         with dynamo_timed("Scheduler.__init__"):
             self._init(nodes)
+
+    @staticmethod
+    def count_kernel_nodes(nodes: Sequence[BaseSchedulerNode]) -> int:
+        return sum(1 for node in nodes if not isinstance(node, NopKernelSchedulerNode))
 
     def _init(self, nodes: list[ir.Operation]) -> None:
         super().__init__()
@@ -5699,7 +5703,15 @@ class Scheduler:
                         # pyrefly: ignore [bad-argument-type]
                         with multi_node.swap_as_triton_caller(choice):
                             future_choices.append(
-                                (choice, *self.compile_kernel(node_list_fused))
+                                (
+                                    choice,
+                                    *self.compile_kernel(
+                                        node_list_fused,
+                                        hint_override=getattr(
+                                            choice, "hint_override", None
+                                        ),
+                                    ),
+                                )
                             )
                     elif is_nvgemm:
                         # pyrefly: ignore [missing-attribute]
@@ -7339,7 +7351,7 @@ class Scheduler:
         """
         Heuristics to avoid benchmarking predictably slow prologue fusions
         """
-        # user opt into more aggressive prologue fusion, dont use heuristics
+        # user opt into more aggressive prologue fusion, don't use heuristics
         if prologue_node.get_operation_names() <= V.graph.invoke_quant_ops:
             return True
 
@@ -9386,12 +9398,7 @@ class Scheduler:
         if min_size > 0:
             for i, (partition, skip) in enumerate(zip(partitions, skip_cudagraphs)):
                 if not skip:
-                    # Count kernels excluding NopKernelSchedulerNode
-                    kernel_count = sum(
-                        1
-                        for n in partition
-                        if not isinstance(n, NopKernelSchedulerNode)
-                    )
+                    kernel_count = self.count_kernel_nodes(partition)
                     if kernel_count < min_size:
                         skip_cudagraphs[i] = True
                         cudagraphs_log.debug(
