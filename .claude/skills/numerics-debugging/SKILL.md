@@ -1,6 +1,6 @@
 ---
 name: numerics-debugging
-description: Debug numeric / bitwise divergence between two PyTorch runs that should agree (eager vs torch.compile, eager vs aot_fx_trace, distributed vs single-process, TF32 vs fp32, before vs after a refactor) by capturing per-op activations with torch.utils._debug_mode.DebugMode and diffing them to localize the first diverging op. Use when the user reports loss drift, mismatched outputs, "numerics don't match", "bitwise divergence", "find which op diverges", or invokes /numerics-debugging.
+description: Debug numeric / bitwise divergence between two PyTorch runs that should agree (eager vs torch.compile, eager vs aot_fx_trace, distributed vs single-process, TF32 vs fp32, before vs after a refactor) by capturing plain torch.utils._debug_mode.DebugMode string dumps with tensor hashes and comparing them to localize the first diverging op. Use when the user reports loss drift, mismatched outputs, "numerics don't match", "bitwise divergence", "find which op diverges", or invokes /numerics-debugging.
 ---
 
 # Numerics Debugging (DebugMode-based)
@@ -8,32 +8,31 @@ description: Debug numeric / bitwise divergence between two PyTorch runs that sh
 When two runs that *should* produce the same numbers don't, the goal is to
 find the **first op where they diverge**, then decide whether that op is the
 cause (its inputs matched but its output didn't) or just a carrier (its inputs
-already differed). This skill captures a per-op fingerprint of one step from
-each run with `torch.utils._debug_mode.DebugMode`, then diffs the two.
+already differed). This skill captures `torch.utils._debug_mode.DebugMode`
+string dumps from one step of each run, with tensor hashes enabled, then
+compares the two dumps.
 
 There is no bundled tooling. You author a small throwaway capture script in
-`agent_space/` from the verified recipe in
+`agent_space/` from the recipe in
 [references/capture-recipe.md](references/capture-recipe.md), run it once per
-side, and compare the two logs.
+side, and compare the plain `debug_string()` text dumps.
 
-## IMPORTANT: probe before you trust the recipe
+## DebugMode Settings
 
-`torch.utils._debug_mode` is **private and version-dependent**. The recipe was
-verified on torch 2.10 and 2.13, but the operator-stream structure (in
-particular how module boundaries are represented) changes across versions:
+Use DebugMode's own string dump as the debugging artifact. Turn on:
 
-- torch ~2.10: module markers are `_NNModuleCall` with a `.module_name` attr.
-- torch ~2.13: module markers are `_AnnotateCall` with `header == "nn.Mod"`
-  and the FQN in `.tag`.
-- `DebugMode.current_nn_module_stack` is **empty at dispatch time** in these
-  versions, so you cannot read the FQN from inside the dispatch hook.
+- `record_realtensor=True`
+- `record_nn_module=True`
+- `record_ids=True`
+- `record_stack_trace=True` when source context is useful
+- `record_profiler_context=True`
+- `run_compile_with_interpreter=True` for AOT/eager compiled regions when
+  module metadata matters
+- `DebugMode.log_tensor_hashes(hash_fn="norm", hash_inputs=True)`
 
-So the first step is always to run the ~15-line probe in the recipe against
-the *actual* environment, confirm the marker class / attribute names, and
-adapt the capture to match. Do not assume. If the probe does not show usable
-layer/module markers for the target model, enable the recipe's generic
-`annotate_modules=True` fallback before capturing; do not rely on framework- or
-model-specific layer-name markers.
+Use `record_nn_module=True` for layer names. Do not monkey-patch modules or add
+framework-specific layer markers; if module names are weak, rely on stack traces,
+profiler scopes, and the surrounding op sequence in the plain dump.
 
 ## Workflow
 
@@ -42,31 +41,33 @@ model-specific layer-name markers.
    diverge and the diff is useless. Set the same `torch.manual_seed(...)`
    before model init and before the step, use the same batch, and enable
    `torch.use_deterministic_algorithms(True)` where possible.
-2. **Probe** the operator stream (recipe, step 1) to confirm the module-marker
-   class for this torch version and whether `record_nn_module=True` produces
-   useful names for this model.
+   For training, first do a one-step scalar check: compare the loss and a
+   deterministic grad norm. If the loss matches bitwise but the grad norm
+   diverges, focus the dump comparison on backward.
+2. **Probe** a tiny `DebugMode.debug_string()` dump (recipe, step 1) to confirm
+   hashes, tensor IDs, stack traces, and module names appear in this
+   environment.
 3. **Capture one step per run** with the capture function (recipe, step 2),
-   writing each run's fingerprints to its own log (`run_A.log`, `run_B.log`).
-   Pass `annotate_modules=True` when the model needs generic layer annotations.
-   The step can be inference-only or forward+backward; capture on a warmed-up
-   step if step 0 has legitimate one-time init/compile differences.
-4. **Diff the two logs** (recipe, step 3 + [references/comparing-runs.md](references/comparing-runs.md)):
-   pair ops by key, parse the hashes as floats, and report the first op whose
-   output hash differs beyond a relative tolerance.
+   writing each run's plain dump to its own file (`run_A_debug.txt`,
+   `run_B_debug.txt`). The step can be inference-only or forward+backward;
+   capture on a warmed-up step if step 0 has legitimate one-time init/compile
+   differences.
+4. **Diff the two dumps** ([references/comparing-runs.md](references/comparing-runs.md)):
+   inspect the plain text and report the first op whose output hash differs.
 
 ## What gets captured per op
 
-For each non-excluded op producing a float tensor:
+For each recorded op in the plain dump:
 
-- **Key** `module_fqn/op_N_opname` (e.g. `features.0.proj/op_0_addmm`) — FQN +
-  per-module op counter + ATen op name.
-- **Phase** — forward or backward (from `torch._C._current_autograd_node()`).
-- **Output hash** — DebugMode's `norm` hash (~L1, float64) of the result.
+- **Module/profiler context** — from `record_nn_module=True` and
+  `record_profiler_context=True`.
+- **Tensor IDs** — from `record_ids=True`.
+- **Source summaries** — from `record_stack_trace=True` and
+  `debug_string(show_stack_trace=True)`.
+- **Output hash** — DebugMode's `norm` hash of the result.
 - **Input hashes** — `norm` hash of each input *before* the op ran. This is
   what catches in-place mutations (e.g. `_fused_adam_` returns `None`, so it
   has no output hash, but its input hashes still move).
-- **Stats** — shape/dtype + L2/min/max/mean, with L2 and mean in **float64**
-  so they don't wobble with reduction order.
 
 ## Interpreting the diff
 
@@ -78,9 +79,9 @@ For each non-excluded op producing a float tensor:
   differs**. That op is the root cause.
 - **Everything diverges from the very first op** -> almost always a dtype or
   seed/determinism mismatch, not a real bug. Fix setup (step 1) and recapture.
-- **A tiny last-digit difference that doesn't propagate** -> reduction-order
-  noise, not a bug. Compare the float64 L2/mean and the `norm` hash with a
-  relative tolerance rather than requiring exact string equality.
+- **A tiny last-digit difference that doesn't propagate** -> often
+  reduction-order noise, not a bug. Use `hash_fn="hash_tensor"` if strict
+  bitwise equality is required.
 
 This was validated on a real divergence: fp32 vs TF32 matmul on the same model
 matched on every forward op but first diverged on a **backward** `mm`, whose
@@ -90,16 +91,13 @@ source. Divergence often first crosses the hash's precision floor in backward
 
 ## Cost
 
-Capture adds roughly 10-40% time/memory on the single captured step only
-(stats reduced inline in float64; no tensor clones held). Because the context
+Capture adds overhead on the single captured step only. Because the context
 wraps just one step, steady-state training is untouched.
 
 ## References
 
 - [references/capture-recipe.md](references/capture-recipe.md) — the probe,
-  generic module annotation fallback, the verified `DebugMode` capture function
-  (forward FQN via the marker/depth stream, backward FQN via a grad_fn map), op
-  filtering, and the compiled/traced-graph caveat.
-- [references/comparing-runs.md](references/comparing-runs.md) — the real log
-  format, tolerance-based pairing/diffing, and the common eager-vs-traced
-  key-drift patterns.
+  relevant DebugMode flags, example dump snippets, single-step training checks,
+  and plain `debug_string()` capture.
+- [references/comparing-runs.md](references/comparing-runs.md) — how to compare
+  the plain dumps and handle common key/order drift.

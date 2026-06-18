@@ -1,237 +1,106 @@
 # Capture recipe
 
-Author a throwaway capture script in `agent_space/` that wraps one step in
-`DebugMode` and writes a per-op fingerprint log. Adapt it to the model and
-the exact computation being compared: inference, forward+backward, an optimizer
-step, or a larger training-loop step. Nothing here is committed.
+Author a throwaway capture script in `agent_space/` that wraps the exact step
+being compared in `DebugMode` and writes `dm.debug_string()` to a text file.
+Do not build a separate log format unless the plain dump is too large to inspect.
 
-Everything below was verified end-to-end on torch 2.10 (CUDA) and the API
-points re-checked on torch 2.13. `torch.utils._debug_mode` is private and
-version-dependent, so **start with the probe**.
+The useful DebugMode settings are:
 
-## Step 1: probe the operator stream (do this first, every time)
+- `record_realtensor=True` — record real tensor ops.
+- `record_nn_module=True` — add `nn.Module` enter markers from the module
+  tracker.
+- `record_ids=True` — give tensors stable IDs in the dump, so input/output
+  flow is easier to follow.
+- `record_stack_trace=True` — include source summaries with
+  `debug_string(show_stack_trace=True)`. Turn this off if the dump is too noisy.
+- `record_profiler_context=True` — keep profiler/record_function context
+  markers. This is the default, but pass it explicitly in the recipe.
+- `run_compile_with_interpreter=True` — use when debugging an aot/eager compiled
+  region and you need FX node/module metadata in the dump.
+- `DebugMode.log_tensor_hashes(hash_fn="norm", hash_inputs=True)` — add output
+  hashes and pre-op input hashes to each op line.
 
-The capture hinges on how `dm.operators` represents module boundaries, which
-changes across torch versions. Confirm it before writing the capture, and check
-whether the target model gets usable layer names without any framework-specific
-setup:
+`log_tensor_hashes` is the key numerics signal. The output `hash` tells you
+whether this op produced the same value in both runs. `input_hash` is computed
+before the op executes, so if an output hash differs while the input hashes
+match, that op is the likely source. If the input hashes already differ, the
+op is only carrying an upstream divergence.
+
+## Step 1: probe the dump shape
+
+`DebugMode` is an internal debugging tool, so first run a tiny probe in the
+same checkout/environment. Confirm that module markers and tensor hashes show
+up in the plain string dump before adapting the recipe to the real model:
 
 ```python
-import torch, torch.nn as nn
+import torch
+import torch.nn as nn
 from torch.utils._debug_mode import DebugMode
 
-class Blk(nn.Module):
-    def __init__(s): super().__init__(); s.fc = nn.Linear(64, 64)
-    def forward(s, x): return torch.relu(s.fc(x))
+class Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(64, 64)
 
-m = nn.Sequential(Blk(), Blk())
-dm = DebugMode(record_realtensor=True, record_nn_module=True, record_ids=True)
+    def forward(self, x):
+        return torch.relu(self.proj(x))
+
+m = nn.Sequential(Block(), Block())
+dm = DebugMode(
+    record_realtensor=True,
+    record_nn_module=True,
+    record_ids=True,
+    record_stack_trace=True,
+    record_profiler_context=True,
+)
 with dm, DebugMode.log_tensor_hashes(hash_fn="norm", hash_inputs=True):
     m(torch.randn(8, 64)).sum().backward()
 
-for o in dm.operators:
-    t = type(o).__name__
-    if t == "_OpCall":
-        print("op  d=%s %s | log=%s" % (o.call_depth, o.op, o.log))
-    else:
-        attrs = {a: getattr(o, a, None) for a in dir(o)
-                 if not a.startswith("__") and not callable(getattr(o, a, None))}
-        print(t, attrs)
+print(dm.debug_string(show_stack_trace=True))
 ```
 
-What this tells you:
+Look for:
 
-- The op-call class is `_OpCall` (import: `from torch.utils._debug_mode import
-  _OpCall`). Each has `.op` (the `OpOverload`), `.call_depth`, `.record` (your
-  dispatch-hook dict), and `.log` (the hash dict, e.g.
-  `{'hash': 446.47, 'input_hash': ((7.69, 377.1, 508.4), {})}`).
-- The **module-marker class and its FQN attribute vary by version**. Observed:
-  - torch ~2.10: class `_NNModuleCall`, FQN in `.module_name`
-    (e.g. `Net.features.0.proj`), with `.call_depth`.
-  - torch ~2.13: class `_AnnotateCall` with `header == "nn.Mod"`, FQN in
-    `.tag` (e.g. `Sequential.0.fc`), with `.call_depth`.
-  Set `MODULE_MARKER` / the FQN getter in the capture below to whatever the
-  probe shows.
-- Module ops appear at `call_depth = marker_depth + 1`, right after their
-  marker. Backward ops all sit at `call_depth == 1` with **no** module markers
-  -> they need the grad_fn map (below).
-- If the probe or target model has no useful `nn.Mod` / module markers, do not
-  add one-off model-specific labels. Use `annotate_modules=True` in the capture
-  function below to temporarily annotate every `named_modules()` entry with its
-  FQN for this one debug step.
+- `[nn.Mod] ...` lines around module execution.
+- Tensor IDs like `$0`, `$1`, etc. on op inputs/outputs.
+- Per-op hash comments containing `hash` and `input_hash`.
+- Useful source summaries when `show_stack_trace=True`.
 
-## Step 2: the capture function (verified working)
+If `record_nn_module=True` does not give useful layer names for the target
+model, keep the dump generic: use stack traces, profiler scopes, tensor IDs, and
+nearby op order. Do not monkey-patch modules just to manufacture layer names.
+
+## Step 2: capture the real step
+
+Use this as the starting point for each side of the comparison. The only output
+is DebugMode's own text dump.
 
 ```python
-import contextlib
 import torch
-import torch.nn as nn
-import torch.utils._pytree as pytree
-from torch.utils._debug_mode import DebugMode, _OpCall, get_active_debug_mode
+from torch.utils._debug_mode import DebugMode
 
-# --- set these from the probe output ---
-def is_module_marker(o):
-    t = type(o).__name__
-    return t == "_NNModuleCall" or (t == "_AnnotateCall" and getattr(o, "header", None) == "nn.Mod")
-
-def marker_fqn(o):
-    return getattr(o, "module_name", None) or getattr(o, "tag", None)
-# ----------------------------------------
-
-EXCLUDED = frozenset({
-    # no real compute / just rewrap storage -> drop so the diff isn't polluted
-    "t", "transpose", "view", "_unsafe_view", "reshape", "permute", "expand",
-    "squeeze", "unsqueeze", "detach", "clone", "_to_copy", "to", "contiguous",
-    "ones_like", "zeros_like", "empty_like", "slice", "select", "as_strided",
-})
-FLOAT = {torch.float32, torch.float16, torch.bfloat16}
-
-def _op_name(func):
-    return func._schema.name.split("::")[-1] if hasattr(func, "_schema") else str(func).split(".")[-1]
-
-def _float_leaves(result, min_numel):
-    out = []
-    for leaf in pytree.tree_leaves(result):
-        if isinstance(leaf, torch.Tensor) and not isinstance(leaf, torch._subclasses.FakeTensor):
-            if leaf.numel() >= min_numel and leaf.dtype in FLOAT:
-                out.append(leaf)
-    return out
-
-def _stats(t):
-    t = t.detach(); t64 = t.to(torch.float64)
-    return {
-        "Shape": f"{tuple(t.shape)} {t.dtype}",
-        "L2": f"{t64.norm(2).item():.6e}",
-        "Min": f"{t.float().min().item():.6e}",
-        "Max": f"{t.float().max().item():.6e}",
-        "Mean": f"{t64.mean().item():.6e}",
-    }
-
-def _hashstr(h):
-    vals = [v for v in pytree.tree_leaves(h) if v is not None]
-    return ", ".join(f"{v:.6e}" if isinstance(v, float) else str(v) for v in vals)
-
-@contextlib.contextmanager
-def _annotate_modules(model):
-    """Fallback when DebugMode's built-in module tracker has no usable names."""
-    originals = []
-    root_name = type(model).__name__
-
-    for fqn, mod in model.named_modules():
-        name = fqn or root_name
-        orig = mod.forward
-
-        def wrapped(*args, __orig=orig, __fqn=name, **kwargs):
-            dm = get_active_debug_mode()
-            if dm is None:
-                return __orig(*args, **kwargs)
-            dm._enter_nn_module_call(__fqn, "nn.Mod")
-            try:
-                return __orig(*args, **kwargs)
-            finally:
-                dm._exit_nn_module_call()
-
-        mod.forward = wrapped
-        originals.append((mod, orig))
-
-    try:
-        yield
-    finally:
-        for mod, orig in reversed(originals):
-            mod.forward = orig
-
-def capture(model, run_fn, *, min_numel=0, annotate_modules=False):
-    """run_fn(model) executes the step to compare. Returns ordered list of
-    {key, phase, stats, out_hash, in_hash}."""
-    # backward FQN map: walk the autograd graph from each module's outputs
-    grad_fn_to_fqn = {}
-    id_to_fqn = {id(m): n for n, m in model.named_modules()}
-    pending = {}
-    def _gfns(obj):
-        return {a.grad_fn for a in pytree.tree_leaves(obj)
-                if isinstance(a, torch.Tensor) and a.grad_fn is not None}
-    def pre(mod, args):
-        if id(mod) in id_to_fqn: pending[id(mod)] = _gfns(args)
-    def post(mod, args, output):
-        fqn = id_to_fqn.get(id(mod))
-        if fqn is None: return
-        inputs = pending.pop(id(mod), set())
-        for t in pytree.tree_leaves(output):
-            if not isinstance(t, torch.Tensor) or t.grad_fn is None: continue
-            stack, seen = [t.grad_fn], set()
-            while stack:
-                fn = stack.pop()
-                if fn in seen or fn in inputs: continue
-                seen.add(fn)
-                grad_fn_to_fqn.setdefault(fn, fqn)   # don't overwrite child claims
-                for parent, _ in fn.next_functions:
-                    if parent is not None and parent not in seen: stack.append(parent)
-    h1 = nn.modules.module.register_module_forward_pre_hook(pre)
-    h2 = nn.modules.module.register_module_forward_hook(post)
-
-    # phase + backward-fqn + inline stats must be captured at dispatch time
-    def record_hook(func, types, args, kwargs, result):
-        node = torch._C._current_autograd_node()
-        rec = {"phase": "backward" if node is not None else "forward",
-               "bwd_fqn": grad_fn_to_fqn.get(node) if node is not None else None}
-        leaves = _float_leaves(result, min_numel)
-        if leaves: rec["stats"] = _stats(leaves[0])
-        return rec
-
-    # Prefer DebugMode's built-in module tracking. If the probe shows no usable
-    # markers for the target model, annotate_modules=True installs generic FQN
-    # markers by temporarily wrapping model.named_modules().
+def capture_debug_string(
+    model,
+    run_fn,
+    path,
+    *,
+    show_stack_trace=True,
+    run_compile_with_interpreter=False,
+):
     dm = DebugMode(
         record_realtensor=True,
-        record_nn_module=not annotate_modules,
+        record_nn_module=True,
         record_ids=True,
+        record_stack_trace=show_stack_trace,
+        record_profiler_context=True,
+        run_compile_with_interpreter=run_compile_with_interpreter,
     )
-    module_ctx = _annotate_modules(model) if annotate_modules else contextlib.nullcontext()
-    try:
-        with module_ctx, dm, DebugMode.log_tensor_hashes(hash_fn="norm", hash_inputs=True), \
-                DebugMode.dispatch_hooks(record_hook=record_hook):
-            run_fn(model)
-    finally:
-        h1.remove(); h2.remove()
+    with dm, DebugMode.log_tensor_hashes(hash_fn="norm", hash_inputs=True):
+        run_fn(model)
 
-    # forward FQN: reconstruct from the marker/call_depth stream with a
-    # depth-truncated stack (pop markers at depth >= current before handling)
-    out, mod_stack, counters, root = [], [], {}, None
-    for o in dm.operators:
-        depth = o.call_depth
-        while mod_stack and mod_stack[-1][0] >= depth:
-            mod_stack.pop()
-        if is_module_marker(o):
-            fqn = marker_fqn(o)
-            if root is None: root = fqn
-            mod_stack.append((depth, fqn))
-            continue
-        if not isinstance(o, _OpCall): continue
-        name = _op_name(o.op)
-        if name in EXCLUDED: continue
-        rec, log = o.record or {}, o.log or {}
-        phase = rec.get("phase", "forward")
-        fqn = (rec.get("bwd_fqn") or "<backward>") if phase == "backward" else \
-              (mod_stack[-1][1] if mod_stack else "<none>")
-        if root and fqn.startswith(root + "."): fqn = fqn[len(root) + 1:]
-        elif fqn == root: fqn = "<root>"
-        out_hash, in_hash = _hashstr(log.get("hash")), _hashstr(log.get("input_hash"))
-        if "stats" not in rec and not out_hash and not in_hash: continue
-        seq = counters.get(fqn, 0); counters[fqn] = seq + 1
-        out.append({"key": f"{fqn}/op_{seq}_{name}", "phase": phase,
-                    "stats": rec.get("stats", {}), "out_hash": out_hash, "in_hash": in_hash})
-    return out
-
-def write_log(captures, path):
     with open(path, "w") as f:
-        f.write(f"Total: {len(captures)}\n" + "=" * 60 + "\n\n")
-        for c in captures:
-            f.write(f"[{c['key']}]\n")
-            for k, v in c["stats"].items(): f.write(f"  {k}: {v}\n")
-            if c["out_hash"]: f.write(f"  Output hash: {c['out_hash']}\n")
-            if c["in_hash"]:  f.write(f"  Input hashes: {c['in_hash']}\n")
-            if c["phase"] != "forward": f.write(f"  Phase: {c['phase']}\n")
-            f.write("\n")
+        f.write(dm.debug_string(show_stack_trace=show_stack_trace))
+        f.write("\n")
 ```
 
 Drive it once per run, with identical setup on both sides:
@@ -247,61 +116,138 @@ def step(m, x):
     m(x).sum().backward()
 
 m, x = build()
-write_log(capture(m, lambda mm: step(mm, x)), "run_A.log")
-# ... change the one thing under test (compile, a distributed wrapper, a flag) ...
+capture_debug_string(m, lambda mm: step(mm, x), "run_A_debug.txt")
+
+# Change exactly one thing under test: compile, a distributed wrapper, a flag,
+# a refactor, etc.
 m, x = build()
-write_log(capture(m, lambda mm: step(mm, x)), "run_B.log")
+capture_debug_string(m, lambda mm: step(mm, x), "run_B_debug.txt")
 ```
 
-If the probe shows missing or framework-specific layer markers, use the generic
-module annotation fallback on both sides:
+For strict bitwise checks, switch from the default `norm` hash to:
 
 ```python
-write_log(capture(m, lambda mm: step(mm, x), annotate_modules=True), "run_A.log")
+DebugMode.log_tensor_hashes(hash_fn="hash_tensor", hash_inputs=True)
 ```
 
-Only use `annotate_modules=True` when `record_nn_module=True` is not enough; it
-temporarily monkey-patches `forward` on the model's `named_modules()` entries
-for the captured step and restores them afterwards.
+or log both:
 
-## Backward FQN attribution
+```python
+DebugMode.log_tensor_hashes(hash_fn=["norm", "hash_tensor"], hash_inputs=True)
+```
 
-During backward the C++ autograd engine drives execution, so no
-`nn.Module.forward` runs and the stream has no module markers for backward ops
-(they all sit at `call_depth == 1`). The `grad_fn_to_fqn` map above fixes this:
-global forward hooks walk the autograd graph from each module's outputs and
-claim unclaimed nodes for that module (`setdefault`, so a parent picks up glue
-ops between children while children keep their own). This was verified to
-recover e.g. `features.1.proj` for a backward `mm`. Ops it can't claim fall back
-to `<backward>`.
+For `torch.compile`/AOT eager comparisons, try:
 
-## Compiled / traced runs
+```python
+capture_debug_string(
+    m,
+    lambda mm: step(mm, x),
+    "run_A_debug.txt",
+    run_compile_with_interpreter=True,
+)
+```
 
-Under `torch.compile`/`aot_fx_trace` the graph runs as `gm(*flat_inputs)`,
-bypassing `nn.Module.forward`, so the marker stream is empty and ops land under
-`<none>`/`<backward>`. Two options:
+## Single-step training check
 
-- If the traced `GraphModule` carries node metadata
-  (`node.meta["custom"]["module_fqn"]`, `node.meta["stack_trace"]`,
-  `node.meta.get("autograd_backward")`), replay via a `torch.fx.Interpreter`
-  subclass that sets that context per node so the capture sees the same FQN /
-  phase eager would. (Newer torch exposes `run_compile_with_interpreter` on
-  `DebugMode` for related plumbing -- check the probe's init signature.)
-- Otherwise, compare **by op sequence**: both logs in dispatch order, paired
-  positionally, relying on op-name + shape + hash. FQN columns will be
-  `<none>` but the divergence point is still findable.
+Before collecting a huge dump from a training job, compare scalar outputs from
+one deterministic step. This tells you where to spend attention:
 
-## Customizing
+```python
+def grad_norm(model):
+    total = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            total += p.grad.detach().double().pow(2).sum()
+    return total.sqrt()
 
-- **`EXCLUDED`** — add an op that pollutes the diff with structurally
-  identical rows; remove one to gain visibility. Collective comms
-  (`all_gather_into_tensor`, `reduce_scatter_tensor`, `wait_tensor`) are
-  deliberately *not* excluded — they often diverge between eager and traced.
-- **`min_numel`** — raise to drop small tensors (set 0 to capture everything,
-  as in the verified demo). Restrict to specific ops by matching `name`
-  against an allowlist before the `EXCLUDED` check.
-- **`hash_fn`** — `"norm"` (L1, float64; tolerance-friendly), `"hash_tensor"`
-  (`torch.hash_tensor`, XOR-reduce of raw bytes, strict bit-exactness), a
-  callable, or a list of the above for a tuple of hashes.
-- **Scalars** (e.g. the loss `sum`) get an empty output hash — expected; they
-  carry stats but nothing to hash meaningfully.
+def training_step(model, batch):
+    loss = model(batch).sum()
+    loss.backward()
+    return loss.detach(), grad_norm(model).detach()
+```
+
+- Loss diverges: start with forward hashes.
+- Loss matches bitwise but grad norm diverges: forward is probably fine; start
+  at the first backward hash mismatch.
+- Loss and grad norm match: look at optimizer state, data loading, RNG
+  consumption after the checked step, or later iterations.
+
+## Example dump snippets
+
+These excerpts were generated from a tiny two-layer CPU model with
+`conda activate pytorch-3.10` on torch `2.14.0a0+gitc45c69c`.
+
+Eager dumps have source summaries, module scopes, tensor IDs, and hash comments:
+
+```text
+    # File: debugmode_dump_smoke.py:49 in capture, code: loss = model(x)
+    [nn.Mod] Net
+
+      # File: debugmode_dump_smoke.py:27 in forward, code: return self.features(x).sum()
+      [nn.Mod] Net.features
+        [nn.Mod] Net.features.0
+
+          # File: debugmode_dump_smoke.py:18 in forward, code: return torch.relu(self.proj(x))
+          [nn.Mod] Net.features.0.proj
+            aten::t(t$0: f32[4, 4])  ->  t$1: f32[4, 4]  # {'input_hash': ((3.243980646133423,), {}), 'hash': 3.243980646133423}
+            aten::addmm(t$2: f32[4], t$3: f32[2, 4], t$1: f32[4, 4])  ->  t$4: f32[2, 4]  # {'input_hash': ((1.0543809533119202, 7.07875682413578, 3.243980646133423), {}), 'hash': 4.30271789431572}
+          aten::relu(t$4: f32[2, 4])  ->  t$5: f32[2, 4]  # {'input_hash': ((4.30271789431572,), {}), 'hash': 2.3040474951267242}
+
+      aten::sum(t$10: f32[2, 4])  ->  t$11: f32[]  # {'input_hash': ((1.0529326498508453,), {}), 'hash': 1.052932620048523}
+```
+
+With `run_compile_with_interpreter=True`, compiled/AOT dumps may include compile
+region annotations and FX-derived source/module context. Names may be rooted at
+Dynamo locals like `L['self']`:
+
+```text
+  [aot_eager region (compile)] enter
+
+    # File: debugmode_dump_smoke.py:26 in forward, code: def forward(self, x: torch.Tensor) -> torch.Tensor:
+    [nn.Mod (compile)] L['self'].features
+      [nn.Mod (compile)] L['self'].features.0
+        [nn.Mod (compile)] L['self'].features.0.proj
+
+          # File: debugmode_dump_smoke.py:18 in forward, code: return torch.relu(self.proj(x))
+          aten::t(t$0: f32[4, 4])  ->  t$1: f32[4, 4]  # {'input_hash': ((3.243980646133423,), {}), 'hash': 3.243980646133423}
+          aten::addmm(t$2: f32[4], t$3: f32[2, 4], t$1: f32[4, 4])  ->  t$4: f32[2, 4]  # {'input_hash': ((1.0543809533119202, 7.07875682413578, 3.243980646133423), {}), 'hash': 4.30271789431572}
+        aten::relu(t$4: f32[2, 4])  ->  t$5: f32[2, 4]  # {'input_hash': ((4.30271789431572,), {}), 'hash': 2.3040474951267242}
+
+    aten::sum(t$10: f32[2, 4])  ->  t$12: f32[]  # {'input_hash': ((1.0529326498508453,), {}), 'hash': 1.052932620048523}
+  [aot_eager region (compile)] exit
+```
+
+The exact operator names may differ (`linear` in eager can appear as `addmm`
+after tracing/lowering). Match by scope, shape, tensor flow, and hashes rather
+than expecting identical text.
+
+When a run is intentionally perturbed, the first forward mismatch is visible in
+the hash comments. In this example the second layer's weight changed, so the
+first different line has a matching activation input hash but different weight
+and output hashes:
+
+```text
+# Run A
+aten::addmm(..., t$5: f32[2, 4], t$7: f32[4, 4])  ->  t$9: f32[2, 4]  # {'input_hash': ((1.1871147155761719, 2.3040474951267242, 4.564039468765259), {}), 'hash': 1.5524791777133942}
+
+# Run B
+aten::addmm(..., t$5: f32[2, 4], t$7: f32[4, 4])  ->  t$9: f32[2, 4]  # {'input_hash': ((1.1871147155761719, 2.3040474951267242, 4.689039468765259), {}), 'hash': 1.7220753133296967}
+```
+
+## Reading the dump
+
+The dump is indented by call depth. Module markers, profiler scopes, operator
+calls, tensor IDs, and hash comments are all in one text artifact. Compare
+`run_A_debug.txt` and `run_B_debug.txt` directly with a text diff and inspect
+the first op where the output `hash` differs.
+
+When an output hash differs, compare that op's `input_hash` values:
+
+- Inputs match and output differs -> this op is the likely root cause.
+- Inputs already differ -> the divergence is upstream; walk backward through
+  tensor IDs and earlier hash comments.
+- Every op differs from the first real op -> setup mismatch, usually dtype,
+  seed, input, RNG, or determinism.
+- Tiny last-digit differences that do not propagate are usually reduction-order
+  noise. Use judgment; the `norm` hash is a float64 reduction, not a proof of
+  bit-exact equality.
