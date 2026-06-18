@@ -37,6 +37,7 @@ from .graph import (
     _is_from_torch,
     _override_sym_repr,
     _PyTreeCodeGen,
+    _PyTreeOutputCodeGen,
     Graph,
     PythonCode,
 )
@@ -926,6 +927,8 @@ class {module_name}(torch.nn.Module):
         if isinstance(self._graph._codegen, _PyTreeCodeGen):
             self._in_spec = self._graph._codegen.pytree_info.in_spec
             self._out_spec = self._graph._codegen.pytree_info.out_spec
+        elif isinstance(self._graph._codegen, _PyTreeOutputCodeGen):
+            self._out_spec = self._graph._codegen.out_spec
 
         python_code = self._graph.python_code(
             root_module="self",

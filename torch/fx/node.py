@@ -20,7 +20,6 @@ from torch.utils._dtype_abbrs import dtype_abbrs
 
 from .._ops import ops as _ops
 from ._compatibility import compatibility
-from .immutable_collections import _immutable_ordered_dict
 
 
 if TYPE_CHECKING:
@@ -216,11 +215,6 @@ def _format_arg(arg: object, max_list_len: float = float("inf")) -> str:
             "" if len(arg) < max_list_len + 1 else f", ...[total_len={len(arg)}]"
         )
         return f"[{items}{maybe_len}]"
-    elif isinstance(arg, _immutable_ordered_dict):
-        items_str = ", ".join(
-            f"({_format_arg(k)}, {_format_arg(v)})" for k, v in arg.items()
-        )
-        return f"OrderedDict([{items_str}])"
     elif isinstance(arg, tuple):
         items = ", ".join(
             _format_arg(a) for idx, a in enumerate(arg) if idx < max_list_len
@@ -286,7 +280,7 @@ class Node(_NodeBase):
     # All of the nodes that use the value produced by this Node
     # Note one user may correspond to several uses, e.g. the node for ``x + x``
     # would appear once here, but represents two uses.
-    # Is a dict to act as an "ordered set". Keys are significant, value dont-care
+    # Is a dict to act as an "ordered set". Keys are significant, value don't-care
     users: dict["Node", None]
     # Type expression representing the output value of this node.
     # This should contain the same class of Type objects that would appear
