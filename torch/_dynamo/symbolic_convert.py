@@ -4198,7 +4198,8 @@ class InstructionTranslatorBase(
                     self.push(str_result)
                     return
                 except Unsupported:
-                    pass
+                    if self.output.should_exit:
+                        raise
 
         fmt_var = VariableTracker.build(
             self, "{:" + fmt_spec.as_python_constant() + "}"
