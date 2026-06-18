@@ -19,19 +19,24 @@ from torch.fx.experimental.proxy_tensor import ProxyTorchDispatchMode, track_ten
 
 @dataclasses.dataclass(frozen=True)
 class FlexGemmOpSpec:
-    """Canonical FlexGEMM view of a supported GEMM op's operand layout."""
+    """Canonical operand positions for a supported FlexGEMM op."""
 
     name: str
     mat1_index: int
     mat2_index: int
+    input_ndim: int
     bias_index: int | None = None
 
 
 FLEX_GEMM_OP_SPECS = {
-    torch.ops.aten.mm.default: FlexGemmOpSpec("mm", 0, 1),
-    torch.ops.aten.addmm.default: FlexGemmOpSpec("addmm", 1, 2, bias_index=0),
-    torch.ops.aten.bmm.default: FlexGemmOpSpec("bmm", 0, 1),
-    torch.ops.aten.baddbmm.default: FlexGemmOpSpec("baddbmm", 1, 2, bias_index=0),
+    torch.ops.aten.mm.default: FlexGemmOpSpec("mm", 0, 1, input_ndim=2),
+    torch.ops.aten.addmm.default: FlexGemmOpSpec(
+        "addmm", 1, 2, input_ndim=2, bias_index=0
+    ),
+    torch.ops.aten.bmm.default: FlexGemmOpSpec("bmm", 0, 1, input_ndim=3),
+    torch.ops.aten.baddbmm.default: FlexGemmOpSpec(
+        "baddbmm", 1, 2, input_ndim=3, bias_index=0
+    ),
 }
 FLEX_GEMM_OP_ALIASES = {
     torch.mm: torch.ops.aten.mm.default,
@@ -47,14 +52,20 @@ _SUPPORTED_FLEX_GEMM_OP_NAMES = "/".join(
 )
 _PRESERVE_FLEX_GEMM_GEMM_OP = "preserve_flex_gemm_gemm_op"
 
+# Note [Preserving FlexGEMM body GEMMs]
+# FlexGEMM lowering materializes the captured epilogue by finding the body GEMM
+# node whose target matches the HOP-carried gemm_op. Generic graph passes can
+# rewrite batch-size-1 bmm into mm(...).unsqueeze(0), which removes the matching
+# node. This body pass tags FlexGEMM GEMM nodes so bmm_to_mm in joint_graph.py
+# skips them.
+
 
 def mark_flex_gemm_body_gemm_node(
     body_graph: torch.fx.GraphModule, gemm_op: torch._ops.OpOverload
 ) -> None:
-    """Preserve the body GEMM op that FlexGEMM lowering matches by identity."""
-    for node in body_graph.graph.nodes:
-        if node.op == "call_function" and node.target == gemm_op:
-            node.meta[_PRESERVE_FLEX_GEMM_GEMM_OP] = True
+    """Mark body GEMMs so Inductor's batch-1 bmm rewrite keeps them matchable."""
+    for node in body_graph.graph.find_nodes(op="call_function", target=gemm_op):
+        node.meta[_PRESERVE_FLEX_GEMM_GEMM_OP] = True
 
 
 FLEX_GEMM_BODY_GRAPH_PASSES: tuple[
