@@ -1615,56 +1615,25 @@ test_distributed() {
 }
 
 test_distributed_4gpu() {
-  # Subset of distributed tests that require 4 GPUs. The full "distributed"
-  # config also exercises many 2-GPU tests; this config keeps scarce 4-GPU
-  # runners (e.g. ROCm gfx950.4) focused on tests that genuinely need
-  # world_size >= 4. New 4-GPU tests should be added here.
-  echo "Testing 4-GPU distributed python tests"
-
-  # Files where every test requires 4 GPUs.
-  # shellcheck disable=SC2086
+  # Run only the distributed tests that require >= 4 GPUs, for runners with
+  # 4-GPU labels (e.g. ROCm gfx950.4). PYTORCH_TEST_MIN_GPU makes
+  # skip_if_lt_x_gpu(n) skip any test gated below 4 GPUs at collection time, so
+  # new 4-GPU tests under these paths are picked up automatically without
+  # editing this script. Test files are discovered dynamically so new files in
+  # these subtrees are included too.
+  export PYTORCH_TEST_MIN_GPU=4
+  echo "Testing distributed python tests that require 4 GPUs"
+  # shellcheck disable=SC2046,SC2086
   time python test/run_test.py --include \
-    distributed/_shard/sharded_optim/test_sharded_optim \
-    distributed/_shard/sharded_tensor/test_sharded_tensor \
-    distributed/_shard/sharded_tensor/ops/test_binary_cmp \
-    distributed/_shard/sharded_tensor/ops/test_embedding \
-    distributed/_shard/sharded_tensor/ops/test_embedding_bag \
-    distributed/_shard/sharded_tensor/ops/test_init \
-    distributed/_shard/sharded_tensor/ops/test_tensor_ops \
-    distributed/_composable/test_replicate_with_fsdp \
-    --verbose $PYTHON_TEST_EXTRA_OPTION
-
-  # test_2d_composability has a single 2-GPU-only test; run everything else.
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/test_composability/test_2d_composability \
-    -k "not test_train_parity_2d_transformer_checkpoint_resume" --verbose $PYTHON_TEST_EXTRA_OPTION
-
-  # FSDP files where only specific methods require 4 GPUs.
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_comm \
-    -k test_fully_shard_force_sum_both_reductions --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_compile \
-    -k test_tp_mixed_precision_dtensor_spec_dtype --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_dtensor \
-    -k "test_fsdp_tp_dtensor_sharded_params or test_reduce_scatter_unused_dtensor_param" --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_grad_scaler \
-    -k test_gradient_scaler --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_memory \
-    -k test_ar_buffer_lifetime_mixed_dtype --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_overlap \
-    -k "test_fully_shard_per_param_mesh_no_grad_input_overlap or test_fully_shard_per_param_mesh_training_overlap" --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_state_dict \
-    -k test_hsdp_tp_state_dict_save_load --verbose $PYTHON_TEST_EXTRA_OPTION
-  # shellcheck disable=SC2086
-  time python test/run_test.py -i distributed/_composable/fsdp/test_fully_shard_training \
-    -k test_2d_mlp_with_nd_mesh --verbose $PYTHON_TEST_EXTRA_OPTION
-
+    $(find test/distributed \
+        \( -path 'test/distributed/_shard/*' \
+           -o -path 'test/distributed/_composable/fsdp/*' \
+           -o -path 'test/distributed/_composable/test_composability/*' \
+           -o -path 'test/distributed/_composable/test_replicate_with_fsdp.py' \) \
+        -name 'test_*.py' -printf '%P\n' \
+        | sed 's|\.py$||; s|^|distributed/|' | sort | tr '\n' ' ') \
+    --shard "$SHARD_NUMBER" "$NUM_TEST_SHARDS" \
+    --verbose $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
   assert_git_not_dirty
 }
 
