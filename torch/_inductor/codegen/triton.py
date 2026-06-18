@@ -7228,7 +7228,11 @@ class FusedUserDefinedTritonKernel(TritonKernel):
                 shape=value.shape,
             )
         else:
-            super().store(name, index, value, mode)
+            # The scheduler should prevent this.
+            raise AssertionError(
+                f"Epilogue attempted to store to '{name}'. "
+                "Inductor indexing variables are not defined in user kernel scope. "
+            )
 
     # returns a str which is the src code of a modified version of the user kernel that includes the epilogues
     def codegen(self) -> str:
