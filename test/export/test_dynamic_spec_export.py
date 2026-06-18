@@ -587,9 +587,85 @@ Range constraints: {u0: VR[0, int_oo], u1: VR[0, int_oo]}""",
                 strict=self.strict,
             )
 
+    def test_export_to_torch_ir_shapes_spec_direct(self):
+        # Strict-only internal-API test; skip in non-strict mode.
+        if not self.strict:
+            return
+        gm = _export_to_torch_ir(
+            _ModX(),
+            (torch.randn(8, 3),),
+            {},
+            dynamic_shapes=PARAMS({"x": T([VAR("batch"), STATIC])}),
+        )
+        self.assertIsInstance(gm, torch.fx.GraphModule)
+        # The user placeholder carries an unbacked dim (u0).
+        self.assertExpectedInline(
+            gm.print_readable(print_output=False),
+            """\
+class GraphModule(torch.nn.Module):
+    def forward(self, x):
+        arg_0: "f32[u0, 3]";
+        arg_0, = fx_pytree.tree_flatten_spec(([x], {}), self._in_spec)
+        l_flat_args_0_ = arg_0
+        res: "f32[3]" = l_flat_args_0_.sum(0);  l_flat_args_0_ = None
+        return pytree.tree_unflatten((res,), self._out_spec)""",
+            ignore_comments=True,
+            ignore_empty_lines=True,
+        )
+
+    def test_export_to_torch_ir_legacy_v1_shapes_spec_raises(self):
+        # Strict-only internal-API test; skip in non-strict mode.
+        if not self.strict:
+            return
+        with mock.patch.object(
+            torch._export.config, "use_new_tracer_experimental", False
+        ):
+            with self.assertRaisesRegex(
+                NotImplementedError,
+                r"ShapesSpec is not supported on the legacy v1",
+            ):
+                _export_to_torch_ir(
+                    _ModX(),
+                    (torch.randn(8, 3),),
+                    {},
+                    dynamic_shapes=PARAMS({"x": T([VAR("batch"), STATIC])}),
+                )
+
+    def test_strict_export_shapes_spec_direct(self):
+        # Strict-only internal-API test; skip in non-strict mode.
+        if not self.strict:
+            return
+        args = (torch.randn(8, 3),)
+        _, in_spec = pytree.tree_flatten((args, {}))
+        artifact = _strict_export(
+            mod=_ModX(),
+            args=args,
+            kwargs={},
+            dynamic_shapes=PARAMS({"x": T([VAR("batch"), STATIC])}),
+            preserve_module_call_signature=(),
+            orig_in_spec=in_spec,
+            prefer_deferred_runtime_asserts_over_guards=False,
+            _to_aten_func=_export_to_aten_ir_make_fx,
+        )
+        self.assertExpectedInline(
+            artifact.aten.gm.print_readable(print_output=False),
+            """\
+class <lambda>(torch.nn.Module):
+    def forward(self, x: "f32[u0, 3]"):
+        sym_size_int: "Sym(u0)" = torch.ops.aten.sym_size.int(x, 0)
+        ge: "Sym(u0 >= 0)" = sym_size_int >= 0;  sym_size_int = None
+        _assert_scalar_default = torch.ops.aten._assert_scalar.default(ge, "Runtime assertion failed for expression u0 >= 0 on node 'ge'");  ge = _assert_scalar_default = None
+        sum_1: "f32[3]" = torch.ops.aten.sum.dim_IntList(x, [0]);  x = None
+        return (sum_1,)""",
+            ignore_comments=True,
+            ignore_empty_lines=True,
+        )
+
 
 class TestExportDynamicSpecStrict(_TestExportDynamicSpecBase):
-    strict = True    def test_named_dims_vs_shapes_spec(self):
+    strict = True
+
+    def test_named_dims_vs_shapes_spec(self):
         from torch.export import Dim
 
         class M(torch.nn.Module):
@@ -799,78 +875,6 @@ class TestExportDynamicSpecNonStrict(_TestExportDynamicSpecBase):
 
 
 del _TestExportDynamicSpecBase
-
-class TestExportDynamicSpecInternalAPIs(TestCase):
-    """Direct unit tests for the internal ``torch.export._trace`` entrypoints
-    with ShapesSpec. The public ``TestExportDynamicSpec`` only exercises these
-    transitively through ``torch.export.export``; these call them in isolation.
-    """
-
-    def setUp(self):
-        super().setUp()
-        _reset_uid_counter()
-
-    def _spec(self):
-        return PARAMS({"x": T([VAR("batch"), STATIC])})
-
-    def test_export_to_torch_ir_shapes_spec_direct(self):
-        gm = _export_to_torch_ir(
-            _ModX(), (torch.randn(8, 3),), {}, dynamic_shapes=self._spec()
-        )
-        self.assertIsInstance(gm, torch.fx.GraphModule)
-        # The user placeholder carries an unbacked dim (u0).
-        self.assertExpectedInline(
-            gm.print_readable(print_output=False),
-            """\
-class GraphModule(torch.nn.Module):
-    def forward(self, x):
-        arg_0: "f32[u0, 3]";
-        arg_0, = fx_pytree.tree_flatten_spec(([x], {}), self._in_spec)
-        l_flat_args_0_ = arg_0
-        res: "f32[3]" = l_flat_args_0_.sum(0);  l_flat_args_0_ = None
-        return pytree.tree_unflatten((res,), self._out_spec)""",
-            ignore_comments=True,
-            ignore_empty_lines=True,
-        )
-
-    def test_export_to_torch_ir_legacy_v1_shapes_spec_raises(self):
-        with mock.patch.object(
-            torch._export.config, "use_new_tracer_experimental", False
-        ):
-            with self.assertRaisesRegex(
-                NotImplementedError,
-                r"ShapesSpec is not supported on the legacy v1",
-            ):
-                _export_to_torch_ir(
-                    _ModX(), (torch.randn(8, 3),), {}, dynamic_shapes=self._spec()
-                )
-
-    def test_strict_export_shapes_spec_direct(self):
-        args = (torch.randn(8, 3),)
-        _, in_spec = pytree.tree_flatten((args, {}))
-        artifact = _strict_export(
-            mod=_ModX(),
-            args=args,
-            kwargs={},
-            dynamic_shapes=self._spec(),
-            preserve_module_call_signature=(),
-            orig_in_spec=in_spec,
-            prefer_deferred_runtime_asserts_over_guards=False,
-            _to_aten_func=_export_to_aten_ir_make_fx,
-        )
-        self.assertExpectedInline(
-            artifact.aten.gm.print_readable(print_output=False),
-            """\
-class <lambda>(torch.nn.Module):
-    def forward(self, x: "f32[u0, 3]"):
-        sym_size_int: "Sym(u0)" = torch.ops.aten.sym_size.int(x, 0)
-        ge: "Sym(u0 >= 0)" = sym_size_int >= 0;  sym_size_int = None
-        _assert_scalar_default = torch.ops.aten._assert_scalar.default(ge, "Runtime assertion failed for expression u0 >= 0 on node 'ge'");  ge = _assert_scalar_default = None
-        sum_1: "f32[3]" = torch.ops.aten.sum.dim_IntList(x, [0]);  x = None
-        return (sum_1,)""",
-            ignore_comments=True,
-            ignore_empty_lines=True,
-        )
 
 
 class _TestContainerSpecBase(TestCase):
@@ -1423,10 +1427,6 @@ class _TestContainerSpecBase(TestCase):
             self.assertEqual(
                 len(out), expected, f"no-spec leaf-count drift for {arg_value!r}"
             )
-
-
-
-
 
 
 class TestContainerSpecStrict(_TestContainerSpecBase):

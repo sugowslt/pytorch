@@ -453,9 +453,7 @@ def _make_fake_inputs_with_spec(
         if isinstance(x, torch.Tensor):
             if leaf_spec is None:
                 return fake_mode.from_tensor(x, static_shapes=True, source=source)
-            ctx = _symbolic_context_from_shapes_spec(
-                x, source, leaf_spec, None, {}
-            )
+            ctx = _symbolic_context_from_shapes_spec(x, source, leaf_spec, None, {})
             fake_x = fake_mode.from_tensor(
                 x, static_shapes=False, source=source, symbolic_context=ctx
             )
