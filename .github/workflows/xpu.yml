@@ -33,6 +33,7 @@ jobs:
       curr_ref_type: ${{ github.ref_type }}
 
   linux-jammy-xpu-n-1-py3_10-build:
+    if: false  # TEMPORARY: disabled for testintro xpu validation (DO NOT LAND)
     name: linux-jammy-xpu-n-1-py3.10
     uses: ./.github/workflows/_linux-build.yml
     needs: get-label-type
@@ -81,6 +82,7 @@ jobs:
     secrets: inherit
 
   linux-noble-xpu-n-py3_10-test:
+    if: false  # TEMPORARY: disabled for testintro xpu validation (DO NOT LAND)
     name: linux-noble-xpu-n-py3.10
     uses: ./.github/workflows/_xpu-test.yml
     needs: linux-noble-xpu-n-py3_10-build
@@ -90,7 +92,75 @@ jobs:
       test-matrix: ${{ needs.linux-noble-xpu-n-py3_10-build.outputs.test-matrix }}
     secrets: inherit
 
+  # TEMPORARY (DO NOT LAND): validate the testintro xpu descriptor against real Intel
+  # GPU hardware. Reuses the noble xpu build, runs the real-vs-simulated enumeration
+  # comparison on linux.idc.xpu, and prints VALIDATION_RESULT to this job's log. Once
+  # confirmed, drop this commit (and tools/testing/introspection/_validate_device.py).
+  xpu-validate-testintro:
+    name: xpu-validate-testintro
+    needs: linux-noble-xpu-n-py3_10-build
+    runs-on: linux.idc.xpu
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout PyTorch
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@main
+
+      - name: Setup XPU
+        uses: ./.github/actions/setup-xpu
+
+      - name: Calculate docker image
+        id: calculate-docker-image
+        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
+        with:
+          docker-image-name: ${{ needs.linux-noble-xpu-n-py3_10-build.outputs.docker-image }}
+
+      - name: Pull docker image
+        uses: pytorch/test-infra/.github/actions/pull-docker-image@main
+        with:
+          docker-image: ${{ steps.calculate-docker-image.outputs.docker-image }}
+
+      - name: Download build artifacts
+        uses: ./.github/actions/download-build-artifacts
+        with:
+          name: ${{ needs.linux-noble-xpu-n-py3_10-build.outputs.build-environment }}
+
+      - name: Validate xpu descriptor vs real device
+        env:
+          DOCKER_IMAGE: ${{ needs.linux-noble-xpu-n-py3_10-build.outputs.docker-image }}
+        run: |
+          set -x
+          # shellcheck disable=SC2086
+          container_name=$(docker run \
+            ${GPU_FLAG:-} \
+            --security-opt seccomp=unconfined \
+            --cap-add=SYS_PTRACE \
+            --shm-size=8g \
+            --tty \
+            --detach \
+            --user jenkins \
+            --privileged \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            "${DOCKER_IMAGE}"
+          )
+          docker exec -t "${container_name}" bash -c '
+            cd .. && cp -R workspace pytorch && cd pytorch
+            pip install dist/*.whl
+            # Source the Intel oneAPI runtime (libsycl etc.) like .ci/pytorch/test.sh does.
+            source /opt/intel/oneapi/compiler/latest/env/vars.sh
+            for c in umf tcm ccl mpi pti; do
+              f=/opt/intel/oneapi/$c/latest/env/vars.sh
+              [ -f "$f" ] && source "$f"
+            done
+            python tools/testing/introspection/_validate_device.py \
+              linux-xpu/default test/test_xpu.py test/test_view_ops.py
+          '
+
   linux-noble-xpu-n-py3_10-client-build:
+    if: false  # TEMPORARY: disabled for testintro xpu validation (DO NOT LAND)
     name: linux-noble-xpu-n-py3.10-client
     uses: ./.github/workflows/_linux-build.yml
     needs: get-label-type
@@ -107,6 +177,7 @@ jobs:
     secrets: inherit
 
   linux-noble-xpu-n-py3_10-client-test:
+    if: false  # TEMPORARY: disabled for testintro xpu validation (DO NOT LAND)
     name: linux-noble-xpu-n-py3.10-client
     uses: ./.github/workflows/_xpu-test.yml
     needs: linux-noble-xpu-n-py3_10-client-build
@@ -117,7 +188,7 @@ jobs:
     secrets: inherit
 
   windows-xpu-n-1-build:
-    if: github.repository_owner == 'pytorch'
+    if: false  # TEMPORARY: disabled for testintro xpu validation (DO NOT LAND)
     name: win-vs2022-xpu-n-1-py3
     uses: ./.github/workflows/_win-build.yml
     with:
@@ -129,7 +200,7 @@ jobs:
     secrets: inherit
 
   windows-xpu-n-build:
-    if: github.repository_owner == 'pytorch'
+    if: false  # TEMPORARY: disabled for testintro xpu validation (DO NOT LAND)
     name: win-vs2022-xpu-n-py3
     uses: ./.github/workflows/_win-build.yml
     with:
