@@ -1617,23 +1617,15 @@ test_distributed() {
 test_distributed_4gpu() {
   # Run only the distributed tests that require >= 4 GPUs, for runners with
   # 4-GPU labels (e.g. ROCm gfx950.4). PYTORCH_TEST_MIN_GPU makes
-  # skip_if_lt_x_gpu(n) skip any test gated below 4 GPUs at collection time, so
-  # new 4-GPU tests under these paths are picked up automatically without
-  # editing this script. Test files are discovered dynamically so new files in
-  # these subtrees are included too.
+  # skip_if_lt_x_gpu(n) skip any test gated below 4 GPUs at collection time.
+  # run_test.py --distributed-tests discovers every distributed test file
+  # dynamically, so a new @skip_if_lt_x_gpu(4) test added anywhere under
+  # test/distributed is picked up automatically with no list to maintain.
   export PYTORCH_TEST_MIN_GPU=4
   echo "Testing distributed python tests that require 4 GPUs"
-  # shellcheck disable=SC2046,SC2086
-  time python test/run_test.py --include \
-    $(find test/distributed \
-        \( -path 'test/distributed/_shard/*' \
-           -o -path 'test/distributed/_composable/fsdp/*' \
-           -o -path 'test/distributed/_composable/test_composability/*' \
-           -o -path 'test/distributed/_composable/test_replicate_with_fsdp.py' \) \
-        -name 'test_*.py' -printf '%P\n' \
-        | sed 's|\.py$||; s|^|distributed/|' | sort | tr '\n' ' ') \
-    --shard "$SHARD_NUMBER" "$NUM_TEST_SHARDS" \
-    --verbose $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
+  # shellcheck disable=SC2086
+  time python test/run_test.py --distributed-tests \
+    --shard "$SHARD_NUMBER" "$NUM_TEST_SHARDS" $INCLUDE_CLAUSE --verbose
   assert_git_not_dirty
 }
 
