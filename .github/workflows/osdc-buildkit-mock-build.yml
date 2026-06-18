@@ -1,26 +1,17 @@
 name: OSDC BuildKit Mock Build
 
-# Smoke test: build a small mock Docker image on a regular OSDC (multi-tenant)
-# runner via the cluster's remote BuildKit, then discard the output
-# (push=false). This validates the runner -> BuildKit path end to end; it does
-# NOT publish an image.
+# Smoke test on the STAGING release canary runner (c-mt-rel-l-x86iavx512-8-64),
+# comparing two runner-group targeting strategies:
+#   - grouped:    explicit group per staging cluster (uw1 and ue1)
+#   - label-only: no group at all -- GitHub schedules onto whichever staging
+#                 cluster's release pool is free.
+# Each job builds a tiny mock image via that cluster's remote BuildKit
+# (push=false) to validate the runner -> BuildKit path; nothing is published.
 #
-# Runner selection:
-#   - The mt-l-x86iavx512-2-4 label is registered on MULTIPLE OSDC prod clusters
-#     and not all of them deploy BuildKit (e.g. the meta-prod-aws-ue1 cluster
-#     has no buildkit namespace). A label-only `runs-on` therefore schedules
-#     non-deterministically and can land on a cluster where
-#     buildkitd-amd64.buildkit does not resolve ("no such host").
-#   - So we pin the runner GROUP to `default`, which is the arc-cbr-production
-#     cluster — a regular OSDC cluster (mt-l- prefix, NOT the mt-rel- release
-#     group) that DOES deploy BuildKit. mt-l-x86iavx512-2-4 is the smallest x86
-#     OSDC runner (2 vCPU / 4 GiB) and is already registered in
-#     .github/actionlint.yaml.
-#   - Within that cluster, BuildKit is reachable because the buildkit
-#     NetworkPolicy allows ingress from the whole arc-runners namespace.
-#
-# BuildKit is a *remote* builder, so this x86 runner connects to the amd64
-# BuildKit service (buildkitd-amd64.buildkit) over the in-cluster network.
+# Both staging clusters register c-mt-rel-l-x86iavx512-8-64 in their OWN
+# per-cluster runner group (the cluster-level runner_group override wins over
+# the def's release-runners group), so the label-only job can land on either
+# cluster. Inspect the job's runner_group_name to see where it ran.
 
 on:
   workflow_dispatch:
@@ -36,34 +27,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  mock-build:
-    # The GHCR_PAT used by the "Login to GHCR" step is a secret of the
-    # docker-build environment, so the job must declare it. NOTE: that
-    # environment has a custom deployment-branch policy (main, nightly,
-    # release/2.*, v2.* tags) -- the secret is only injected when the run is on
-    # one of those branches, and environment secrets are never available to
-    # pull_request runs from a fork.
-    environment: docker-build
+  # Set 1: explicit runner group -- one job per staging cluster.
+  grouped:
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [meta-staging-aws-uw1, meta-staging-aws-ue1]
+    name: grouped-${{ matrix.group }}
     runs-on:
-      group: default
-      labels: mt-l-x86iavx512-2-4
+      group: ${{ matrix.group }}
+      labels: c-mt-rel-l-x86iavx512-8-64
     container:
       image: ghcr.io/actions/actions-runner:latest
     timeout-minutes: 15
     steps:
-      # Diagnostic: does ghcr.io egress work from a regular mt-l-* (default
-      # group) runner? The cache-enforcer DaemonSet is expected to block ghcr.io
-      # egress on this pool (release runners are exempt via
-      # osdc.io/runner-class=release), so this step likely fails with a network
-      # error -- that outcome IS the test result. GHCR_PAT is only available on
-      # workflow_dispatch from the base repo, not on fork PRs, so run this via
-      # "Run workflow" to get a meaningful (auth vs. egress) signal.
-      - name: Login to GHCR (egress test)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: pytorch
-          password: ${{ secrets.GHCR_PAT }}
+      - name: Report runner identity
+        run: |
+          set -eu
+          echo "runner: ${RUNNER_NAME:-?}  hostname: $(hostname)"
+          echo "buildkitd-amd64.buildkit -> $(getent hosts buildkitd-amd64.buildkit || echo 'UNRESOLVED')"
 
       - name: Install buildctl
         run: |
@@ -90,9 +72,8 @@ jobs:
           set -eu
           ENDPOINT="tcp://buildkitd-amd64.buildkit:1234"
           echo "Connecting to remote BuildKit: $ENDPOINT"
-          # The buildkit client dials with gRPC's ~20s connect timeout, so a
-          # cold / busy pool can drop the first dials. Retry to outlast a cold
-          # scale-up: ~20 x (≈5s fail + 15s) ≈ 7 min.
+          # gRPC connect timeout is ~20s and a cold / busy pool can drop the
+          # first dials, so retry to outlast a cold scale-up.
           for attempt in $(seq 1 20); do
             if buildctl --addr "$ENDPOINT" build \
                 --frontend dockerfile.v0 \
@@ -108,9 +89,59 @@ jobs:
           echo "FAIL: mock build failed after retries" >&2
           exit 1
 
-      - name: Verify BuildKit endpoint
+  # Set 2: label only, no group -- exercises non-deterministic cross-cluster
+  # scheduling (the label exists on both staging clusters).
+  label-only:
+    name: label-only
+    runs-on: c-mt-rel-l-x86iavx512-8-64
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    timeout-minutes: 15
+    steps:
+      - name: Report runner identity
+        run: |
+          set -eu
+          echo "runner: ${RUNNER_NAME:-?}  hostname: $(hostname)"
+          echo "buildkitd-amd64.buildkit -> $(getent hosts buildkitd-amd64.buildkit || echo 'UNRESOLVED')"
+
+      - name: Install buildctl
+        run: |
+          set -eu
+          BUILDKIT_VERSION="v0.29.0"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz" \
+            | tar xz --strip-components=1 -C "$HOME/.local/bin" bin/buildctl
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/buildctl" --version
+
+      - name: Generate mock Docker context
+        run: |
+          set -eu
+          mkdir -p mock-image
+          cat > mock-image/Dockerfile <<'EOF'
+          FROM alpine:3.21
+          RUN echo "OSDC BuildKit mock build OK" > /mock.txt
+          CMD ["cat", "/mock.txt"]
+          EOF
+
+      - name: Build mock image via OSDC BuildKit (push=false)
         run: |
           set -eu
           ENDPOINT="tcp://buildkitd-amd64.buildkit:1234"
-          buildctl --addr "$ENDPOINT" debug info || echo "WARN: debug info not available"
-          echo "PASS: OSDC BuildKit endpoint responsive"
+          echo "Connecting to remote BuildKit: $ENDPOINT"
+          # gRPC connect timeout is ~20s and a cold / busy pool can drop the
+          # first dials, so retry to outlast a cold scale-up.
+          for attempt in $(seq 1 20); do
+            if buildctl --addr "$ENDPOINT" build \
+                --frontend dockerfile.v0 \
+                --local context=mock-image \
+                --local dockerfile=mock-image \
+                --output type=image,name=osdc/mock-build:${{ github.sha }},push=false; then
+              echo "PASS: mock image built on attempt ${attempt} ($ENDPOINT)"
+              exit 0
+            fi
+            echo "attempt ${attempt}/20 failed (BuildKit cold/queued); retrying in 15s..."
+            sleep 15
+          done
+          echo "FAIL: mock build failed after retries" >&2
+          exit 1
