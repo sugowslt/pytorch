@@ -1,7 +1,8 @@
 """Assorted utilities, which do not need anything other than torch and stdlib."""
 
 import operator
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Sequence, Sized
+from typing import TypeGuard
 
 import torch
 
@@ -9,11 +10,13 @@ from . import _dtypes_impl
 
 
 # https://github.com/numpy/numpy/blob/v1.23.0/numpy/distutils/misc_util.py#L497-L504
-def is_sequence(seq: object) -> bool:
+def is_sequence(seq: object) -> TypeGuard[Sized]:
     if isinstance(seq, str):
         return False
+    if not isinstance(seq, Sized):
+        return False
     try:
-        len(seq)  # pyrefly: ignore[bad-argument-type]
+        len(seq)
     except Exception:
         return False
     return True

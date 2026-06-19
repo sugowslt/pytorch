@@ -124,13 +124,13 @@ def normalize_not_implemented(
 
 
 def normalize_axis_like(
-    arg: object,
+    arg: AxisLike | ndarray,
     parm: inspect.Parameter | None = None,  # codespell:ignore
-) -> object:
+) -> AxisLike:
     from ._ndarray import ndarray
 
     if isinstance(arg, ndarray):
-        arg = operator.index(arg)
+        return operator.index(arg)
     return arg
 
 
@@ -173,8 +173,9 @@ def normalize_outarray(
 def normalize_casting(
     arg: object,
     parm: inspect.Parameter | None = None,  # codespell:ignore
-) -> object:
-    if arg not in ["no", "equiv", "safe", "same_kind", "unsafe"]:
+) -> CastingModes:
+    valid = ("no", "equiv", "safe", "same_kind", "unsafe")
+    if not isinstance(arg, str) or arg not in valid:
         raise ValueError(
             f"casting must be one of 'no', 'equiv', 'safe', 'same_kind', or 'unsafe' (got '{arg}')"
         )
@@ -311,7 +312,8 @@ def normalizer(
 
             # The normalizer rebuilds args/kwds, so they are no longer the
             # ParamSpec-tracked *args/**kwargs; the call is correct at runtime.
-            result: object = func(*norm_args, **norm_kwds)  # fmt: skip # pyrefly: ignore[invalid-param-spec]
+            # pyrefly: ignore[invalid-param-spec]
+            result: object = func(*norm_args, **norm_kwds)
 
             # keepdims
             bound_args = None
@@ -325,7 +327,8 @@ def normalizer(
                     axis = bound_args.get("axis")
                     if not isinstance(tensor, torch.Tensor):
                         raise AssertionError("keepdims requires a tensor first arg")
-                    result = _util.apply_keepdims(result, axis, tensor.ndim)  # fmt: skip # pyrefly: ignore[bad-argument-type]
+                    # pyrefly: ignore[bad-argument-type]
+                    result = _util.apply_keepdims(result, axis, tensor.ndim)
 
             # out
             if "out" in params:

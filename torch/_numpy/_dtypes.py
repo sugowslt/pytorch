@@ -5,7 +5,7 @@ Define the scalar types and supported dtypes and numpy <--> torch dtype mappings
 from __future__ import annotations
 
 import builtins
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
 import torch
 
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ._ndarray import ndarray
+
+
+_T = TypeVar("_T")
 
 
 # ### Scalar types ###
@@ -303,9 +306,7 @@ class DType:
             sctype = arg.dtype._scalar_type
         else:
             sctype = sctype_from_string(arg)
-        # sctype is a scalar type in every branch; the unions from the dynamic
-        # attribute lookups above defeat static narrowing.
-        self._scalar_type = sctype  # pyrefly: ignore[bad-assignment]
+        self._scalar_type = sctype
 
     @property
     def name(self) -> str:
@@ -432,15 +433,15 @@ def set_default_dtype(
 
     # set the new global state and return the old state
     old_defaults = _dtypes_impl.default_dtypes
-    _dtypes_impl._default_dtypes = new_defaults  # fmt: skip # pyrefly: ignore[bad-assignment]  # TODO
+    # pyrefly: ignore[bad-assignment]  # TODO
+    _dtypes_impl._default_dtypes = new_defaults
     return old_defaults
 
 
-def issubclass_(arg: object, klass: type | tuple[type, ...]) -> bool:
-    try:
-        return issubclass(arg, klass)  # pyrefly: ignore[bad-argument-type]
-    except TypeError:
-        return False
+def issubclass_(arg: object, klass: type[_T]) -> TypeGuard[type[_T]]:
+    # issubclass() raises TypeError if arg is not a class; guard explicitly so a
+    # non-class arg returns False (and narrows arg to type[_T] on success).
+    return isinstance(arg, type) and issubclass(arg, klass)
 
 
 def issubdtype(arg1: object, arg2: object) -> bool:
@@ -460,7 +461,7 @@ def issubdtype(arg1: object, arg2: object) -> bool:
         arg1 = dtype(arg1).type
     if not issubclass_(arg2, generic):
         arg2 = dtype(arg2).type
-    return issubclass(arg1, arg2)  # fmt: skip # pyrefly: ignore[bad-argument-type, invalid-argument]
+    return issubclass(arg1, arg2)
 
 
 __all__ = ["dtype", "DType", "typecodes", "issubdtype", "set_default_dtype", "sctypes"]

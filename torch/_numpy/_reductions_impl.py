@@ -308,11 +308,13 @@ def cumsum(
     if dtype is None:
         dtype = a.dtype
 
-    (a,), axis = _util.axis_none_flatten(a, axis=axis)  # fmt: skip # pyrefly: ignore[bad-argument-type]
+    # pyrefly: ignore[bad-argument-type]
+    (a,), axis = _util.axis_none_flatten(a, axis=axis)
     axis = _util.normalize_axis_index(axis, a.ndim)
 
     # torch accepts the numpy-compat `axis=` alias, but its stub only lists `dim`.
-    return a.cumsum(axis=axis, dtype=dtype)  # fmt: skip # pyrefly: ignore[missing-argument, unexpected-keyword]
+    # pyrefly: ignore[missing-argument, unexpected-keyword]
+    return a.cumsum(axis=axis, dtype=dtype)
 
 
 def cumprod(
@@ -326,11 +328,13 @@ def cumprod(
     if dtype is None:
         dtype = a.dtype
 
-    (a,), axis = _util.axis_none_flatten(a, axis=axis)  # fmt: skip # pyrefly: ignore[bad-argument-type]
+    # pyrefly: ignore[bad-argument-type]
+    (a,), axis = _util.axis_none_flatten(a, axis=axis)
     axis = _util.normalize_axis_index(axis, a.ndim)
 
     # torch accepts the numpy-compat `axis=` alias, but its stub only lists `dim`.
-    return a.cumprod(axis=axis, dtype=dtype)  # fmt: skip # pyrefly: ignore[missing-argument, unexpected-keyword]
+    # pyrefly: ignore[missing-argument, unexpected-keyword]
+    return a.cumprod(axis=axis, dtype=dtype)
 
 
 cumproduct = cumprod
