@@ -40,11 +40,15 @@ This is a structured, progressive system design interview preparation covering e
 
 ## How to Use This Repository
 
-1. **Read Daily Topic:** Navigate to `day-XX/` folder
-2. **Study Visualization:** Open the `.excalidraw` file
-3. **Read Deep Dive:** Study the `explanation.md` file
-4. **Interview Prep:** Review `interview-tips.md`
-5. **Practice:** Implement key concepts locally
+**Start Here:** 
+- Read `QUICK-START.md` for study plan, memory techniques, and progress tracking
+
+**For Each Daily Topic:**
+1. **Read Deep Dive:** Study the `explanation.md` file (blog-style, comprehensive)
+2. **Study Visualization:** Review the architecture diagram
+3. **Interview Prep:** Review `interview-tips.md` (10-min, 30-min, 1-hour versions)
+4. **Practice:** Implement key concepts, whiteboard explanations
+5. **Reflect:** Answer the self-check questions before moving to next day
 
 ---
 
