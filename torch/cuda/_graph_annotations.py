@@ -326,26 +326,21 @@ def mark_kernels(annotation: str | dict[str, Any]):
 
 
 def stamp_capture_graph_id(torch_cuda_graph: torch.cuda.CUDAGraph) -> None:
-    """Record the capturing graph's id on the graph object for later remap.
+    """Record the captured graph's id on the graph object for later remap.
 
-    Called on graph capture entry while the current stream is still capturing,
-    so the template graph (and its id) is available even when ``keep_graph=False``
-    destroys it at ``capture_end``. ``remap_to_exec_graph`` later matches this
-    graph's annotations to its exec id via this stamp, without relying on call
-    ordering. No-op if annotations are disabled, ``cudaGraphNodeGetToolsId`` is
-    unavailable, or the current stream is not capturing. Harmless when no
-    ``mark_kernels`` regions run: the annotation map stays empty so resolve and
-    remap are no-ops.
+    Called from ``capture_end`` in the window after capture ends and before the
+    graph is finalized, where the template ``cudaGraph_t`` is live for both
+    ``keep_graph`` modes (and reachable via ``raw_cuda_graph``). ``remap_to_exec_graph``
+    later matches this graph's annotations to its exec id via this stamp, without
+    relying on call ordering. No-op if annotations are disabled or
+    ``cudaGraphNodeGetToolsId`` is unavailable. Harmless when no ``mark_kernels``
+    regions run: the annotation map stays empty so resolve and remap are no-ops.
     """
     if not _annotations_enabled or _is_tools_id_unavailable():
         return
-    stream = _cuda_runtime.cudaStream_t(  # pyrefly: ignore[missing-attribute]
-        init_value=torch.cuda.current_stream().cuda_stream
+    graph = _cuda_runtime.cudaGraph_t(  # pyrefly: ignore[missing-attribute]
+        init_value=torch_cuda_graph.raw_cuda_graph()
     )
-    capture_state = _get_capture_state(stream)
-    if capture_state is None:
-        return
-    graph, _ = capture_state
     # Past the _is_tools_id_unavailable() guard cuda-bindings is present and the
     # driver supports the toolsId API (same version gate as cudaGraphGetId), so
     # any error here is unexpected: error-check and let it raise.
