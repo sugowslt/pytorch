@@ -63,6 +63,7 @@ if not torch.backends.cuda.is_built():
     fake_export_failures.add(xfail("geqrf"))
     fake_export_failures.add(xfail("__getitem__"))
     fake_export_failures.add(xfail("nn.functional.batch_norm"))
+    fake_export_failures.add(xfail("nn.functional.grid_sample"))
 
 fake_decomposition_failures = {
     xfail("linalg.matrix_rank"),
