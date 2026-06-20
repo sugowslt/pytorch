@@ -106,7 +106,7 @@ class CUDAGraph(_CUDAGraph):
     # Read-only property exposed from the C++ _CUDAGraph base via pybind;
     # annotated (not assigned) so the type checker sees it without shadowing it.
     _has_graph_exec: bool
-    # Stays None unless stamp_capture_graph_id stamps it at capture entry
+    # Stays None unless maybe_stamp_capture_graph_id stamps it during capture_end
     # (requires annotations enabled and cudaGraphNodeGetToolsId available).
     _capture_graph_id: int | None
     # Exec graph id the recorded annotations are currently keyed to, or None
@@ -207,15 +207,15 @@ class CUDAGraph(_CUDAGraph):
         which call ``capture_end`` internally.
         """
         self.capture_end_pre()
-        try:
-            # Stamp the capture graph id while the template is live (both
-            # keep_graph modes); self-gates on annotations being enabled.
-            from torch.cuda._graph_annotations import stamp_capture_graph_id
+        # Stamp the capture graph id while the template is live (both keep_graph
+        # modes); self-gates on annotations being enabled. An error here is
+        # unexpected and propagates -- we deliberately don't wrap this in a
+        # finally that calls capture_end_post(), since a failing finalize would
+        # mask the real (stamp) error.
+        from torch.cuda._graph_annotations import maybe_stamp_capture_graph_id
 
-            stamp_capture_graph_id(self)
-        finally:
-            # Always finalize, even if stamping raised, so the graph is usable.
-            self.capture_end_post()
+        maybe_stamp_capture_graph_id(self)
+        self.capture_end_post()
 
     def instantiate(self) -> None:
         r"""Instantiate the CUDA graph. Will be called by

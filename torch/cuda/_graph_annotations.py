@@ -325,7 +325,7 @@ def mark_kernels(annotation: str | dict[str, Any]):
         _pending_scopes.append((annotation, tools_ids))
 
 
-def stamp_capture_graph_id(torch_cuda_graph: torch.cuda.CUDAGraph) -> None:
+def maybe_stamp_capture_graph_id(torch_cuda_graph: torch.cuda.CUDAGraph) -> None:
     """Record the captured graph's id on the graph object for later remap.
 
     Called from ``capture_end`` in the window after capture ends and before the
@@ -338,14 +338,14 @@ def stamp_capture_graph_id(torch_cuda_graph: torch.cuda.CUDAGraph) -> None:
     """
     if not _annotations_enabled or _is_tools_id_unavailable():
         return
-    graph = _cuda_runtime.cudaGraph_t(  # pyrefly: ignore[missing-attribute]
-        init_value=torch_cuda_graph.raw_cuda_graph()
-    )
     # Past the _is_tools_id_unavailable() guard cuda-bindings is present and the
     # driver supports the toolsId API (same version gate as cudaGraphGetId), so
-    # any error here is unexpected: error-check and let it raise.
+    # any error here is unexpected: error-check and let it raise. cudaGraphGetId
+    # accepts the raw cudaGraph_t handle (int) directly.
     torch_cuda_graph._capture_graph_id = _check_cuda_bindings(
-        _cuda_runtime.cudaGraphGetId(graph)  # pyrefly: ignore[missing-attribute]
+        _cuda_runtime.cudaGraphGetId(  # pyrefly: ignore[missing-attribute]
+            torch_cuda_graph.raw_cuda_graph()
+        )
     )
     # Fresh capture: annotations are keyed by this capture id until remapped.
     torch_cuda_graph._remapped_exec_id = None
@@ -389,7 +389,7 @@ def remap_to_exec_graph(torch_cuda_graph: torch.cuda.CUDAGraph) -> None:
     This function rewrites the keys so annotations match the trace.
 
     The graph's capture id is read from the ``_capture_graph_id`` stamped on it
-    by ``stamp_capture_graph_id`` at capture entry, so only the annotations
+    by ``maybe_stamp_capture_graph_id`` in the capture_end window, so only the annotations
     belonging to this graph are rekeyed. This is order-independent and correct
     when several graphs are captured in sequence: call once per graph. Graphs
     captured with annotations disabled have no capture id and are skipped.
