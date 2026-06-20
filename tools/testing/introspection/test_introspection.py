@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.testing.introspection import collector, diff, platforms, where
+from tools.testing.introspection import collector, diff, platforms
 
 from torch.testing._internal.common_utils import run_tests, slowTest, TestCase
 
@@ -142,15 +142,6 @@ class TestDiff(TestCase):
             aff = diff._scope(["test/test_base.py"], sel, graph)
             self.assertIn("test/test_dep.py", aff)  # synthetic dependent pulled in
             self.assertNotIn("test/test_other.py", aff)
-
-
-class TestWhere(TestCase):
-    def test_match(self):
-        tid = "TestFooCUDA::test_bar_cuda_float32"
-        self.assertTrue(where._match(tid, tid))  # full id
-        self.assertTrue(where._match("test_bar_cuda_float32", tid))  # bare method
-        self.assertTrue(where._match("test_bar", tid))  # substring
-        self.assertFalse(where._match("test_baz", tid))
 
 
 if __name__ == "__main__":
