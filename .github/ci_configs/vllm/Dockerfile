@@ -50,11 +50,6 @@ ENV UV_LINK_MODE=copy
 FROM ${BUILD_BASE_IMAGE} AS base
 USER root
 
-# The pytorch CI base image activates a venv via VIRTUAL_ENV; vllm installs with
-# `uv pip install --system` but inspects with bare `uv pip freeze`, which diverge
-# when a venv is active. Unset it so both hit the same on-PATH interpreter.
-ENV VIRTUAL_ENV=""
-
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 
@@ -78,6 +73,13 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+
+# The pytorch CI base image provides Python as an activated venv (VIRTUAL_ENV +
+# PATH), which is the interpreter `python3 setup.py` and `uv pip freeze` use.
+# `uv pip install --system` deliberately bypasses that venv and targets the
+# separate /usr system python, so torch would land where the build can't see it.
+# Omit --system here so installs land in the active venv. The vllm-base/final
+# stages keep --system since they build on the manylinux FINAL_BASE_IMAGE.
 
 WORKDIR /workspace
 
@@ -104,22 +106,22 @@ RUN --mount=type=bind,source=${TORCH_WHEELS_PATH},target=/dist \
         torch_whl=$(find /dist -maxdepth 1 -name 'torch-*.whl' -print -quit); \
         vision_whl=$(find /dist -name 'torchvision*.whl' | head -n1 | xargs); \
         audio_whl=$(find /dist -name 'torchaudio*.whl' | head -n1 | xargs); \
-        uv pip install --system "${torch_whl}[opt-einsum]" "${vision_whl}" "${audio_whl}" /dist/*.whl; \
+        uv pip install "${torch_whl}[opt-einsum]" "${vision_whl}" "${audio_whl}" /dist/*.whl; \
     elif [ -n "$PINNED_TORCH_VERSION" ]; then \
         echo "[INFO] Installing pinned torch nightly version to build vllm: $PINNED_TORCH_VERSION"; \
-        uv pip install --system "$PINNED_TORCH_VERSION" --index-url https://download.pytorch.org/whl/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        uv pip install "$PINNED_TORCH_VERSION" --index-url https://download.pytorch.org/whl/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "[INFO] Installing torch nightly with latest one to build vllm"; \
-        uv pip install --system torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
 # Install numba 0.61.2 for cuda environment
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system numba==0.61.2
+    uv pip install numba==0.61.2
 
 # Install common dependencies from vllm common.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/common.txt
+    uv pip install -r requirements/common.txt
 
 RUN uv pip freeze | grep -i '^torch\|^torchvision\|^torchaudio' > torch_build_versions.txt
 RUN cat torch_build_versions.txt
@@ -135,7 +137,7 @@ COPY . .
 RUN python3 use_existing_torch.py
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build/cuda.txt
+    uv pip install -r requirements/build/cuda.txt
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
