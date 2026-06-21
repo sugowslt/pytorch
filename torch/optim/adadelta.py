@@ -299,7 +299,7 @@ def _single_tensor_adadelta(
 
         if torch.is_complex(param):
             delta = torch.view_as_complex(delta)
-        param.add_(delta, alpha=-lr)
+        param.add_(delta, alpha=-lr)  # type: ignore[arg-type]
 
 
 def _multi_tensor_adadelta(

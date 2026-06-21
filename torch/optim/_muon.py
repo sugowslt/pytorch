@@ -350,7 +350,7 @@ def _single_tensor_muon(
         adjusted_lr = _adjust_lr(lr, adjust_lr_fn, param.shape)
 
         param.mul_(1 - lr * weight_decay)
-        param.add_(update, alpha=-adjusted_lr)
+        param.add_(update, alpha=-adjusted_lr)  # type: ignore[arg-type]
 
 
 @_disable_dynamo_if_unsupported(single_tensor_fn=_single_tensor_muon)
