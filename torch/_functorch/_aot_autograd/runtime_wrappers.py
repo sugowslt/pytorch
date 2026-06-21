@@ -3212,7 +3212,6 @@ def _codegen_compiled_backward(
     ]
     code_globals: dict[str, object] = {
         "torch": torch,
-        "functools": functools,
     }
 
     lines.append("""\
@@ -3242,12 +3241,6 @@ def _codegen_compiled_backward(
     lines.append("    def impl_fn(double_ctx=None):")
     lines.append("        out = _impl_(_ctx_, all_args)")
     lines.append("        return _epilogue_(out)")
-
-    lines.append("    if (torch._C._is_key_in_tls('context')")
-    lines.append(
-        "            and (_cc := torch._C._get_obj_in_tls('context')) is not None):"
-    )
-    lines.append("        impl_fn = functools.partial(_cc.run, impl_fn)")
 
     if inputs_require_grad:
         lines.append("    if torch.is_grad_enabled():")
