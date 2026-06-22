@@ -470,7 +470,7 @@ def generate_static_dispatch_backend_call(
     f: NativeFunction,
     backend_index: BackendIndex,
 ) -> str:
-    cpp_sig = gen_static_dispatch_backend_call_signature(sig, f)
+    cpp_sig = gen_static_dispatch_backend_call_signature(f)
     name = cpp_sig.name()
     exprs = translate_args(sig, cpp_sig)
     backend_metadata = backend_index.get_kernel(f)
@@ -2786,8 +2786,10 @@ def main() -> None:
     parser.add_argument(
         "--headeronly-install-dir",
         "--headeronly_install_dir",
-        help="output directory for header-only generated files (e.g. enum_tag.h)",
-        default="build/torch/headeronly/core",
+        help="output directory for header-only generated files (e.g. enum_tag.h). "
+        "Defaults to `<install-dir>/core` when --install-dir is set, otherwise "
+        "`build/torch/headeronly/core`.",
+        default=None,
     )
     parser.add_argument(
         "--rocm",
@@ -2925,14 +2927,18 @@ def main() -> None:
         ignore_keys.update(MPS_KEYS)
         dispatch_keys[:] = [k for k in dispatch_keys if k not in MPS_KEYS]
 
+    XPU_KEYS = {
+        DispatchKey.XPU,
+        DispatchKey.SparseXPU,
+        DispatchKey.SparseCsrXPU,
+        DispatchKey.NestedTensorXPU,
+    }
     if options.xpu or options.update_aoti_c_shim:
         functions_keys.add(DispatchKey.XPU)
         aoti_backends.add(DispatchKey.XPU)
     else:
-        ignore_keys.add(DispatchKey.XPU)
-
-        if DispatchKey.XPU in dispatch_keys:
-            del dispatch_keys[dispatch_keys.index(DispatchKey.XPU)]
+        ignore_keys.update(XPU_KEYS)
+        dispatch_keys[:] = [k for k in dispatch_keys if k not in XPU_KEYS]
 
     if not options.mtia:
         ignore_keys.add(DispatchKey.MTIA)
@@ -2986,7 +2992,12 @@ def main() -> None:
     aoti_install_dir = f"{options.aoti_install_dir}"
     Path(aoti_install_dir).mkdir(parents=True, exist_ok=True)
 
-    headeronly_install_dir = f"{options.headeronly_install_dir}"
+    if options.headeronly_install_dir is not None:
+        headeronly_install_dir = options.headeronly_install_dir
+    elif options.install_dir is not None:
+        headeronly_install_dir = f"{options.install_dir}/core"
+    else:
+        headeronly_install_dir = "build/torch/headeronly/core"
     Path(headeronly_install_dir).mkdir(parents=True, exist_ok=True)
 
     core_fm = make_file_manager(options=options, install_dir=core_install_dir)
