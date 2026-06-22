@@ -1937,6 +1937,14 @@ class triton:
     # Setting to None means uninitialized
     autotune_at_compile_time: bool | None = autotune_at_compile_time_default()
 
+    # When autotuning at compile time, also prepend the (no-op) "Compile-time
+    # auto-tuning block" docstring to the emitted output module. The real autotuning
+    # already ran during codegen; this block is debug-only text, so a consumer that
+    # extracts runnable source from the emitted module can disable it to avoid
+    # emitting then stripping it. It affects emitted source, so it stays part of the
+    # FxGraphCache key (hashed via save_config_portable, absent from the ignore lists).
+    autotune_at_compile_time_emit_source: bool = True
+
     # We use random tensors for autotune by default. Setting this as true will let us
     # use inputs from sample inputs to autotune user defined triton kernels.
     # Side effect for this option is increased memory footprint during first pass compilation.
