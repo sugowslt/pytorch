@@ -226,12 +226,10 @@ RUN if command -v apt-get >/dev/null; then \
     && ln -s /opt/venv/bin/pip /usr/bin/pip \
     && python3 --version && python3 -m pip --version
 
-# The pytorch CI FINAL_BASE_IMAGE also ships its own activated venv on PATH; the
-# block above created this stage's /opt/venv. Activate it so python3, pip, and uv
-# all target /opt/venv. As in the base stage, the installs below omit --system
-# (which would escape the venv to the /usr system python) so they land here.
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH=/opt/venv/bin:${PATH}
+# The pytorch CI FINAL_BASE_IMAGE already provides an activated venv (with pip)
+# on PATH, which shadows the bare /opt/venv created above. As in the base stage,
+# omit --system below so installs land in that active venv - the same interpreter
+# python3 and the pip freeze checks use.
 
 # Get the torch versions, and whls used in previous stage
 COPY --from=base /workspace/torch_build_versions.txt ./torch_build_versions.txt
