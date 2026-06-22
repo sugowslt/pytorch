@@ -85,6 +85,20 @@ class TestNCCL(TestCase):
         for i in range(torch.cuda.device_count()):
             self.assertEqual(tensors[i], expected)
 
+        # Test with a non-zero root (regression test for #179908)
+        root = nGPUs - 1
+        expected = torch.zeros(128).uniform_().to(dtype=dtype)
+        tensors = [
+            expected.cuda(device)
+            if device == root
+            else torch.zeros(128, dtype=dtype, device=device)
+            for device in range(nGPUs)
+        ]
+
+        nccl.broadcast(tensors, root=root)
+        for i in range(nGPUs):
+            self.assertEqual(tensors[i], expected)
+
     @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
     @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "only one GPU detected")
     @dtypes(*datatypes)
@@ -230,6 +244,26 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
     def device(self) -> torch.device:
         return torch.device("cuda", self.rank)
 
+    @classmethod
+    def _init_pg(cls, rank, world_size, rdvz_file):
+        # Eager NCCL communicator init via device_id, so symm_mem rendezvous
+        # does not require a separate warm-up collective.
+        if rdvz_file is None:
+            raise AssertionError("Expected rdvz_file to not be None")
+        os.environ["LOCAL_RANK"] = str(rank)
+        device = torch.device("cuda", rank)
+        torch.cuda.set_device(device)
+        store = c10d.FileStore(rdvz_file, world_size)
+        c10d.init_process_group(
+            backend="nccl",
+            world_size=world_size,
+            rank=rank,
+            store=store,
+            timeout=cls.timeout,
+            device_id=device,
+        )
+        cls.pg = c10d.distributed_c10d._get_default_group()
+
     @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
     @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
     @requires_nccl_version((2, 27), "NCCL Symmetric Memory support from nccl 2.27")
@@ -288,6 +322,47 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
 
     @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
     @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
+    @skip_if_lt_x_gpu(2)
+    def test_nccl_symmem_rendezvous_world(self):
+        symm_mem.set_backend("NCCL")
+        group_name = c10d.group.WORLD.group_name
+
+        t = symm_mem.empty(64, device=self.device)
+        handle = symm_mem.rendezvous(t, group=group_name)
+
+        self.assertEqual(handle.world_size, self.world_size)
+        self.assertEqual(handle.rank, self.rank)
+
+        t.fill_(self.rank)
+        c10d.barrier()
+
+        peer_rank = (self.rank + 1) % self.world_size
+        buf = handle.get_buffer(peer_rank, (64,), torch.float32)
+        self.assertTrue(buf.eq(peer_rank).all())
+
+    @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
+    @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
+    @skip_if_lt_x_gpu(2)
+    def test_nccl_symmem_rendezvous_subgroup(self):
+        symm_mem.set_backend("NCCL")
+
+        subgroup = c10d.new_group(list(range(self.world_size)))
+
+        t = symm_mem.empty(64, device=self.device)
+        handle = symm_mem.rendezvous(t, group=subgroup)
+
+        self.assertEqual(handle.world_size, self.world_size)
+        self.assertEqual(handle.rank, self.rank)
+
+        t.fill_(self.rank)
+        c10d.barrier(group=subgroup)
+
+        peer_rank = (self.rank + 1) % self.world_size
+        buf = handle.get_buffer(peer_rank, (64,), torch.float32)
+        self.assertTrue(buf.eq(peer_rank).all())
+
+    @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
+    @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
     @requires_nccl_version(
         (2, 28), "NCCL Symmetric Memory support device API from nccl 2.28"
     )
@@ -316,6 +391,56 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
         symm_mem.rendezvous(inp, group=group_name)
         res = torch.ops.symm_mem.one_shot_all_reduce(inp, "sum", group_name)
         self.assertEqual(out, res)
+
+    @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
+    @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
+    @requires_nccl_version(
+        (2, 28), "NCCL Symmetric Memory support device API from nccl 2.28"
+    )
+    @skip_if_lt_x_gpu(2)
+    def test_nccl_symmem_collective_cuda_graph(self):
+        symm_mem.set_backend("NCCL")
+        torch.cuda.set_device(self.rank)
+        # Need this all_reduce to initialize NCCL communicator. Otherwise, the
+        # test will hang.  TODO: investigate how NCCLSymmetricMemory can
+        # initialize NCCL communicator.
+        c10d.all_reduce(torch.ones(1, device=self.device))
+        group_name = c10d.group.WORLD.group_name
+
+        dtype = torch.float
+        numel = 1024
+
+        out = symm_mem.empty(numel, dtype=dtype, device=self.device).fill_(self.rank)
+        symm_mem.rendezvous(out, group=group_name)
+        graph_all_reduce = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph_all_reduce):
+            c10d.all_reduce(out)
+        graph_all_reduce.replay()
+        torch.cuda.synchronize()
+        self.assertEqual(
+            out, torch.full_like(out, (self.world_size - 1) * self.world_size / 2)
+        )
+
+        inp = symm_mem.empty(numel, dtype=dtype, device=self.device).fill_(self.rank)
+        symm_mem.rendezvous(inp, group=group_name)
+        graph_one_shot_all_reduce = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph_one_shot_all_reduce):
+            res = torch.ops.symm_mem.one_shot_all_reduce(inp, "sum", group_name)
+        graph_one_shot_all_reduce.replay()
+        self.assertEqual(out, res)
+
+        for repeat in range(3):
+            offset = 13 + repeat
+            inp.fill_(self.rank + offset)
+            out.fill_(self.rank + offset)
+            res.fill_(0.0)
+            expected_sum = float(
+                self.world_size * offset + self.world_size * (self.world_size - 1) / 2
+            )
+            graph_all_reduce.replay()
+            graph_one_shot_all_reduce.replay()
+            self.assertEqual(out, torch.full_like(out, expected_sum))
+            self.assertEqual(res, out)
 
     @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
     @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
@@ -577,6 +702,184 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
                 out[j],
                 torch.full_like(out[j], expected),
                 msg=f"rank {self.rank}: out[{j}] should contain the reduced sum",
+            )
+
+    @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
+    @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
+    @requires_nccl_version((2, 28, 0), "nccl_all_to_all_nd requires nccl 2.28")
+    @skip_if_lt_x_gpu(2)
+    @parametrize(
+        "scatter_gather,out_2d,input_3d",
+        [
+            ((1, 0), False, False),
+            ((1, 0), True, False),
+            ((1, 0), False, True),
+            ((1, 0), True, True),
+            ((0, 1), False, False),
+            ((0, 1), True, False),
+            ((0, 1), False, True),
+            ((0, 1), True, True),
+        ],
+    )
+    def test_all_to_all_nd(self, scatter_gather, out_2d, input_3d):
+        """all_to_all_nd: (1,0)/(0,1); 3-D input [rows,G,loc] or [G,loc,cols] where supported."""
+        scatter_dim, gather_dim = scatter_gather
+        symm_mem.set_backend("NCCL")
+        torch.cuda.set_device(self.rank)
+        c10d.all_reduce(torch.ones(1, device=self.device))
+        group_name = c10d.group.WORLD.group_name
+
+        p = self.world_size
+        dtype = torch.float
+
+        if scatter_dim == 1 and gather_dim == 0:
+            local_cols = 4
+            rows = 8
+            if input_3d:
+                buf = symm_mem.empty(
+                    rows, p, local_cols, dtype=dtype, device=self.device
+                ).fill_(float(self.rank))
+            else:
+                buf = symm_mem.empty(
+                    rows, p * local_cols, dtype=dtype, device=self.device
+                ).fill_(float(self.rank))
+            symm_mem.rendezvous(buf, group=group_name)
+            if out_2d:
+                out = torch.empty(p * rows, local_cols, dtype=dtype, device=self.device)
+            else:
+                out = torch.empty(p, rows, local_cols, dtype=dtype, device=self.device)
+            symm_mem.all_to_all_nd(
+                buf,
+                out,
+                scatter_dim=scatter_dim,
+                gather_dim=gather_dim,
+                group=group_name,
+            )
+            torch.cuda.synchronize()
+            out_view = out.view(p, rows, local_cols) if out_2d else out
+            for j in range(p):
+                self.assertEqual(
+                    out_view[j],
+                    torch.full(
+                        (rows, local_cols),
+                        float(j),
+                        dtype=dtype,
+                        device=self.device,
+                    ),
+                    msg=f"rank {self.rank}: out[{j}] should be peer {j}'s column block",
+                )
+        else:
+            local_rows = 4
+            cols = 4
+            if input_3d:
+                buf = symm_mem.empty(
+                    p, local_rows, cols, dtype=dtype, device=self.device
+                ).fill_(float(self.rank))
+            else:
+                buf = symm_mem.empty(
+                    p * local_rows, cols, dtype=dtype, device=self.device
+                ).fill_(float(self.rank))
+            symm_mem.rendezvous(buf, group=group_name)
+            if out_2d:
+                out = torch.empty(local_rows, p * cols, dtype=dtype, device=self.device)
+            else:
+                out = torch.empty(local_rows, p, cols, dtype=dtype, device=self.device)
+            symm_mem.all_to_all_nd(
+                buf,
+                out,
+                scatter_dim=scatter_dim,
+                gather_dim=gather_dim,
+                group=group_name,
+            )
+            torch.cuda.synchronize()
+            out_view = out.view(local_rows, p, cols) if out_2d else out
+            for j in range(p):
+                self.assertEqual(
+                    out_view[:, j, :],
+                    torch.full(
+                        (local_rows, cols),
+                        float(j),
+                        dtype=dtype,
+                        device=self.device,
+                    ),
+                    msg=f"rank {self.rank}: out[:, {j}, :] should be peer {j}'s row block",
+                )
+
+    @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
+    @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")
+    @requires_nccl_version((2, 29), "nccl_all_gather_offset requires nccl 2.29")
+    @skip_if_lt_x_gpu(2)
+    # Shard sizes are multiples of 8 so every slice stays 16-byte aligned for
+    # both float (4B) and bfloat16 (2B), as the kernel requires.  `out` is a
+    # symmetric tensor; the multimem (NVLink SHARP) path is used when multicast
+    # is available, otherwise the LSA push fallback (e.g. NCCL_NVLS_ENABLE=0).
+    # [16384, 32] mixes a large shard (split across CTAs -- data parallel) with
+    # a tiny one (single CTA), exercising the adaptive launch geometry.
+    @parametrize("split_sizes", [[64], [32, 96], [16, 48, 32], [16384, 32]])
+    @parametrize("explicit_offsets", [False, True])
+    @parametrize("dtype", [torch.float, torch.bfloat16])
+    def test_all_gather_offset(self, split_sizes, explicit_offsets, dtype):
+        """all_gather_offset: gather each rank's parameter shards into a
+        parameter-contiguous symmetric output, fusing the copy-out reorder.
+        Covers both the default (derived) and an explicitly-passed
+        split_offsets, and multiple dtypes."""
+        symm_mem.set_backend("NCCL")
+        torch.cuda.set_device(self.rank)
+        c10d.all_reduce(torch.ones(1, device=self.device))
+        group_name = c10d.group.WORLD.group_name
+
+        n_params = len(split_sizes)
+        offsets = []
+        acc = 0
+        for sz in split_sizes:
+            offsets.append(acc)
+            acc += sz
+        numel = acc
+
+        # Distinct per-(rank, param) constant, kept small so it is exactly
+        # representable in bfloat16.
+        def value(rank, i):
+            return float((i + 1) * 10 + (rank + 1))
+
+        inp = symm_mem.empty(numel, dtype=dtype, device=self.device)
+        for i in range(n_params):
+            inp[offsets[i] : offsets[i] + split_sizes[i]] = value(self.rank, i)
+        symm_mem.rendezvous(inp, group=group_name)
+
+        out = symm_mem.empty(
+            numel * self.world_size, dtype=dtype, device=self.device
+        ).fill_(0)
+        symm_mem.rendezvous(out, group=group_name)
+        symm_mem.all_gather_offset(
+            inp,
+            out,
+            group_name,
+            split_sizes,
+            split_offsets=offsets if explicit_offsets else None,
+        )
+        torch.cuda.synchronize()
+
+        # Parameter i occupies out[off*W : (off+size)*W], with source rank r
+        # at sub-offset r*size.
+        for i in range(n_params):
+            base = offsets[i] * self.world_size
+            for r in range(self.world_size):
+                region = out[
+                    base + r * split_sizes[i] : base + (r + 1) * split_sizes[i]
+                ]
+                self.assertEqual(
+                    region,
+                    torch.full_like(region, value(r, i)),
+                    msg=f"rank {self.rank}: param {i} from src rank {r} mismatch",
+                )
+
+        # Source buffer must be unmodified.
+        for i in range(n_params):
+            src_slice = inp[offsets[i] : offsets[i] + split_sizes[i]]
+            self.assertEqual(
+                src_slice,
+                torch.full_like(src_slice, value(self.rank, i)),
+                msg=f"rank {self.rank}: source param {i} should be unchanged",
             )
 
     @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
