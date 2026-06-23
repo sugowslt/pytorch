@@ -967,7 +967,7 @@ class BlockMask:
         return dq_kv_order[index[:2] + (slice(None),)]
 
     def _query_length_for_sliced_blocks(
-        self, q_index: slice | Tensor, selected_q_blocks: int
+        self, q_index: int | slice | Tensor, selected_q_blocks: int
     ) -> int:
         """Maps a Q-block selection to its packed logical token length."""
         q_block_size = self.BLOCK_SIZE[0]
