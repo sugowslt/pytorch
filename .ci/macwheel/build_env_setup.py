@@ -8,10 +8,11 @@ This script just emits the macOS build flags to the --env-out file so the
 caller (build.sh) can source them into the wheel build subprocess. Without that
 handoff the exports made here die with this process.
 
-Environment variables read:
-    OMP_PREFIX - optional; if /opt/llvm-openmp exists it is exported so the
-                 build links the conda-forge libomp (supports older macOS than
-                 the Homebrew build). See .ci/macwheel/install_libomp.sh.
+Environment variables written (to --env-out):
+    OMP_PREFIX - if /opt/llvm-openmp exists it is exported so the build links
+                 the conda-forge libomp (supports older macOS than the Homebrew
+                 build). See .ci/macwheel/install_libomp.sh.
+    (plus the static macOS build flags in MACOS_BUILD_ENV)
 """
 
 import argparse

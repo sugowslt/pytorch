@@ -4,8 +4,9 @@
 # modules (build_env_setup.py / build_install_deps.py / build_wheel.py /
 # repair_wheel.py) are non-orchestrating stages that stay version-agnostic.
 #
-# Scope: wheels only. macOS ships no libtorch package (libtorch is built on
-# Linux via .ci/libtorch/), so there is no BUILD_PYTHONLESS path here.
+# Scope: wheels only. There is no separate BUILD_PYTHONLESS libtorch build on
+# macOS; the libtorch artifact is extracted from the finished wheel by a later
+# workflow job (.ci/libtorch/extract_libtorch_from_wheel.py).
 #
 # Expects the desired interpreter already on PATH (the per-host loop selects it
 # via `uv python install`), plus PYTORCH_ROOT and (optionally)
