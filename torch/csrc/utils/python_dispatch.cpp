@@ -278,7 +278,7 @@ static c10::DispatchKeySet pyobject_dispatch_compute_keyset(
 // torch/csrc/jit/python/pybind_utils.cpp. Since we're trying to avoid
 // conversion to IValue, we have to manually implement normalization here.
 //
-// TODO(rzou): normalization is incomplete and will just return false which
+// TODO(#187974): normalization is incomplete and will just return false which
 // leads to falling back to the C++ Dispatcher. We'll build out this path
 // some more in the future.
 static bool pyobject_dispatch_try_normalize_args(
@@ -438,8 +438,8 @@ static PyObject* pyobject_dispatch_with_keyset(
     PyObject* kwnames,
     Py_ssize_t op_args_start) {
   Py_ssize_t nkwargs = kwnames == nullptr ? 0 : PyTuple_GET_SIZE(kwnames);
-  // TODO(rzou): Figure out how to handle the Python key directly in PyObject
-  // dispatch. For now, send it back to the C++ dispatcher.
+  // TODO(#187974): Figure out why we need a special case to send the Python
+  // key back to the C++ Dispatcher.
   if (C10_UNLIKELY(key_set.has(c10::DispatchKey::Python))) {
     return pyobject_dispatch_call_redispatch_cpp(
         self->cpp_redispatch_fn,
@@ -1491,7 +1491,7 @@ void initDispatchBindings(PyObject* module) {
       .value("FAKE", TorchDispatchModeKey::FAKE);
 }
 
-// TODO(rzou): dedupe with the kernel
+// TODO: dedupe with the kernel
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 void python_op_registration_trampoline_impl(
     const c10::OperatorHandle& op,
