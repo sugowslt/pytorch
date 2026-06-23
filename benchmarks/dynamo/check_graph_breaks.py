@@ -67,7 +67,7 @@ def check_graph_breaks(
 
     for model in actual_csv["name"]:
         num_graphs = get_field(actual_csv, model, "unique_graphs")
-        dynamo_called = num_graphs is not None and int(num_graphs) != "0"
+        dynamo_called = num_graphs is not None and int(num_graphs) != 0
 
         graph_breaks = get_field(actual_csv, model, "graph_breaks")
         expected_graph_breaks = get_field(expected_csv, model, "graph_breaks")
