@@ -38,7 +38,7 @@ function(metal_to_metallib_h SHADER)
     cmake_path(APPEND ${CMAKE_CURRENT_BINARY_DIR} native mps ${SHADER_STEM} OUTPUT_VARIABLE SHADER_HDR)
     cmake_path(APPEND_STRING SHADER_HDR "_metallib.h")
 
-    add_custom_command(COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/torch/utils/_write_metallib_headers.py ${SHADER_ABSOLUTE} ${SHADER_HDR}
+    add_custom_command(COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/write_metallib_headers.py ${SHADER_ABSOLUTE} ${SHADER_HDR}
                        DEPENDS ${SHADER_ABSOLUTE}
                        OUTPUT ${SHADER_HDR}
                        COMMENT "Generating metallib wrapper header for ${SHADER}"

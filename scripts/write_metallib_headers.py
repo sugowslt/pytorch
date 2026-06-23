@@ -11,7 +11,10 @@ def write_metallib_headers(metal_filename: str, output_filename: str):
     embedded_headers = subprocess.run(
         [
             sys.executable,
-            Path(__file__).resolve().parent / "_cpp_embed_headers.py",
+            Path(__file__).resolve().parent.parent
+            / "torch"
+            / "utils"
+            / "_cpp_embed_headers.py",
             metal_filename,
         ],
         capture_output=True,
