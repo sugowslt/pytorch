@@ -41,6 +41,7 @@ from torch._logging import trace_structured
 from torch._opaque_base import OpaqueBase
 from torch.utils._mode_utils import no_dispatch
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
+from torch.utils._typing_utils import not_none
 from torch.utils.weak import WeakIdKeyDictionary
 
 
@@ -561,10 +562,12 @@ class MetaStorageDesc:
         if isinstance(self.size, torch.SymInt):
             node = self.size.node
             free_symbols = node.expr.free_symbols
-            if free_symbols and all(
-                symbol in node.shape_env.var_to_hint_override for symbol in free_symbols
-            ):
-                metadata["size_hint"] = node.shape_env.optimization_hint(node.expr)
+            if free_symbols:
+                shape_env = not_none(node.shape_env)
+                if all(
+                    symbol in shape_env.var_to_hint_override for symbol in free_symbols
+                ):
+                    metadata["size_hint"] = shape_env.optimization_hint(node.expr)
         return metadata
 
 
@@ -881,6 +884,11 @@ def _grad_context_compatible(
     if not _view_base_compatible(symbolic_context, grad_desc):
         return False
 
+    if grad_desc.is_traceable_wrapper_subclass and not isinstance(
+        symbolic_context, SubclassSymbolicContext
+    ):
+        return False
+
     # Check inner (subclass) level
     if isinstance(symbolic_context, SubclassSymbolicContext):
         if grad_desc.attrs is None:
@@ -1171,13 +1179,13 @@ class MetaConverter(Generic[_TensorT]):
                     )
                 else:
                     # FakeTensor from a different ShapeEnv.  Transfer symbols.
+                    # _transfer_foreign_expr picks the hint up via the foreign env.
                     return shape_env.transfer_symbols_from_foreign_shape_env(
                         t.size,
                         t.stride,
                         t.storage_offset,
                         src,
                         symbolic_context=symbolic_context,
-                        hint_overrides=t.dynamo_hint_overrides,
                     )
             else:
                 return (t.size, t.stride, t.storage_offset)
@@ -2094,16 +2102,25 @@ class MetaConverter(Generic[_TensorT]):
                         raise AssertionError("t.storage must not be None")
                     from torch.fx.experimental.symbolic_shapes import (
                         guard_or_false,
-                        statically_known_true,
                         sym_eq,
                     )
 
                     storage_needs_resize = False
+                    source_storage_size = s.size
+                    source_storage_is_zero = (
+                        isinstance(source_storage_size, int)
+                        and source_storage_size == 0
+                    )
                     if not r.is_nested:
                         r_storage = r.untyped_storage()
-                        storage_needs_resize = not statically_known_true(
-                            s.size == 0
-                        ) and statically_known_true(r_storage.size() < s.size)
+                        r_storage_size = r_storage.size()
+                        if isinstance(r_storage_size, int) and isinstance(
+                            source_storage_size, int
+                        ):
+                            storage_needs_resize = (
+                                source_storage_size != 0
+                                and r_storage_size < source_storage_size
+                            )
                     if s.id not in self.storage_memo and (
                         r.is_nested
                         or (
@@ -2132,7 +2149,7 @@ class MetaConverter(Generic[_TensorT]):
                                 raise AssertionError(
                                     "r.real_tensor must not be None when copy_data is True"
                                 )
-                            if statically_known_true(s.size == 0):
+                            if source_storage_is_zero:
                                 _set_real_storage(
                                     r.untyped_storage(),
                                     r.real_tensor.untyped_storage(),
