@@ -1,4 +1,56 @@
 //  Copyright © 2022 Apple Inc.
+//
+//  MERGED HEADER (v2): pairs with the merged MPSAllocator.mm. Takes the
+//  current/upstream header (Kind-keyed buffer pools, cpu_ptr caching,
+//  MPSEvent-based sync, getHostAliasStorage, DeviceStats, etc.) as the base
+//  and re-adds the Intel-discrete-GPU support that upstream dropped.
+//
+//  What's restored here, and why:
+//
+//    1. BufferPool::Kind gets two new members: PRIVATE_LARGE, PRIVATE_SMALL.
+//       Upstream currently only has SHARED_SMALL / SHARED_LARGE / SCALAR
+//       because it assumes unified memory everywhere. Discrete GPUs need a
+//       real PRIVATE (GPU-only) pool — Shared storage on a discrete GPU is
+//       not a true zero-copy mapping, just a slower PCIe-coherent fallback.
+//
+//    2. AllocParams gains back a `has_unified_memory` flag, set once per
+//       allocation request in alloc_buffer_block() (see the .mm). It's used
+//       by HeapBlock::createHeapBlock() to size the XLARGE heap tier
+//       differently per platform (see #3) — NOT used to pick Private vs.
+//       Shared storage; that's decided by the USAGE flags the caller passes
+//       in (UsageFlags::PRIVATE vs UsageFlags::SHARED), same as upstream.
+//
+//    3. kXLargeHeap (a single MB(1024) constant) is replaced by
+//       kXLargeHeapU (unified / Apple Silicon, MB(1024)) and kXLargeHeapD
+//       (discrete, MB(128)) — a discrete GPU's working set is typically far
+//       smaller, so reserving a 1 GiB heap per "extra large" allocation
+//       tier is overly aggressive there. getHeapTier() takes a third
+//       `has_unified_memory` argument to pick between them.
+//
+//    4. default_low_watermark_ratio is split into
+//       default_low_watermark_ratio_unified (1.4, unchanged) and
+//       default_low_watermark_ratio_discrete (1.0) — a tighter default for
+//       discrete GPUs, so the allocator starts GC'ing / refusing new
+//       allocations earlier, before Metal itself would return a null
+//       buffer under fragmentation (see alloc_buffer() in the .mm).
+//
+//    5. `init_buffer_pools()` is (re-)declared in the private section. The
+//       paired .mm calls it from init_allocator() to build the Kind-keyed
+//       pool map (now including the two new PRIVATE_* kinds); this
+//       declaration appears to have been missing from the upstream header
+//       as pasted, so it's added here since the .mm depends on it.
+//
+//  Everything else (cpu_ptr, MPSEventPtr event, getHostAliasStorage,
+//  recordEvents/waitForEvents, getBufferId, getDeviceStats,
+//  resetAccumulatedStats/resetPeakStats, freeInactiveBuffers, the
+//  available_buffers/buffers_pending_free/heaps_pending_update bookkeeping)
+//  is upstream's and is left untouched — none of it is platform-specific.
+//
+//  NOTE: `isSharedStorageSupported()` on the IMPSAllocator interface and the
+//  `getIMPSAllocator(bool sharedAllocator)` signature are NOT in this file —
+//  they belong in MPSAllocatorInterface.h, which hasn't been provided. Those
+//  still need the same kind of restoration on that header for the merged
+//  .mm to compile.
 
 #pragma once
 
@@ -24,12 +76,19 @@ static const size_t kMinLargeAlloc = MB(10); // allocations between 1 and 10 MiB
 static const size_t kRoundLarge = MB(2); // round up large allocations to 2 MiB
 static const size_t kSmallHeap = MB(8); // "small" allocations are packed in 8 MiB heaps
 static const size_t kLargeHeap = MB(32); // "large" allocations may be packed in 32 MiB heaps
-static const size_t kXLargeHeap = MB(1024); // "extra large" allocations may be packed in 1 GiB heaps
+// RESTORED FOR DISCRETE GPU SUPPORT: split the single upstream kXLargeHeap
+// into a unified-memory and a discrete-GPU variant (see comment block above).
+static const size_t kXLargeHeapU = MB(1024); // "extra large" allocations on unified (Apple Silicon) devices
+static const size_t kXLargeHeapD = MB(128); // "extra large" allocations on discrete-GPU devices
 static const size_t kMaxScalarAlloc = (sizeof(int64_t)); // largest "scalar" allocation
 
 enum class HeapTier { SMALL, LARGE, XLARGE, OVERSIZE };
 
-inline HeapTier getHeapTier(size_t size, bool has_memory_pressure) {
+// RESTORED FOR DISCRETE GPU SUPPORT: added `has_unified_memory` so the
+// XLARGE/OVERSIZE boundary is computed against the platform-correct heap
+// size constant instead of always assuming kXLargeHeapU.
+inline HeapTier getHeapTier(size_t size, bool has_memory_pressure, bool has_unified_memory) {
+  const size_t kXLargeHeap = has_unified_memory ? kXLargeHeapU : kXLargeHeapD;
   if (size <= kMaxSmallAlloc) {
     return HeapTier::SMALL;
   } else if (size < kMinLargeAlloc) {
@@ -110,6 +169,13 @@ struct AllocParams {
   // true if we exceed the low watermark limit. In this case
   // we apply strategies to relieve the pressure before allocation.
   bool has_memory_pressure = false;
+  // RESTORED FOR DISCRETE GPU SUPPORT: true if this allocation is happening
+  // on a unified-memory (Apple Silicon) device. Set once in
+  // alloc_buffer_block() and consulted by HeapBlock::createHeapBlock() to
+  // pick the platform-correct XLARGE heap size constant. This does NOT
+  // decide Private vs. Shared storage — that's still purely a function of
+  // the `usage` flags the caller passed in.
+  bool has_unified_memory = false;
 };
 
 struct HeapBlock {
@@ -155,7 +221,10 @@ struct HeapBlock {
     const size_t size = params.size();
     MTLHeapDescriptor* d = [MTLHeapDescriptor new];
     if (d) {
-      switch (getHeapTier(size, params.has_memory_pressure)) {
+      // RESTORED FOR DISCRETE GPU SUPPORT: pass has_unified_memory through
+      // so the XLARGE tier boundary (and the size assigned below) uses the
+      // platform-correct constant.
+      switch (getHeapTier(size, params.has_memory_pressure, params.has_unified_memory)) {
         case HeapTier::SMALL:
           d.size = kSmallHeap;
           break;
@@ -163,7 +232,7 @@ struct HeapBlock {
           d.size = kLargeHeap;
           break;
         case HeapTier::XLARGE:
-          d.size = kXLargeHeap;
+          d.size = params.has_unified_memory ? kXLargeHeapU : kXLargeHeapD;
           break;
         case HeapTier::OVERSIZE:
           d.size = kRoundLarge * ((size + kRoundLarge - 1) / kRoundLarge);
@@ -238,7 +307,13 @@ struct HeapBlock {
 typedef bool (*HeapComparison)(const HeapBlock*, const HeapBlock*);
 
 struct BufferPool {
+  // RESTORED FOR DISCRETE GPU SUPPORT: added PRIVATE_LARGE / PRIVATE_SMALL.
+  // Upstream only has the SHARED_* kinds (+ SCALAR) because it assumes
+  // unified memory everywhere; discrete GPUs need real Private-storage
+  // pools too (see the file-level comment above).
   enum class Kind {
+    PRIVATE_SMALL,
+    PRIVATE_LARGE,
     SHARED_SMALL,
     SHARED_LARGE,
     SCALAR,
@@ -372,8 +447,12 @@ class MPSHeapAllocatorImpl {
   // we set the allowed upper bound to twice the size of recommendedMaxWorkingSetSize.
   constexpr static double default_high_watermark_upper_bound = 2.0;
   // (see m_low_watermark_ratio for description)
+  // RESTORED FOR DISCRETE GPU SUPPORT: split into a unified-memory default
+  // (unchanged from upstream) and a tighter discrete-GPU default, chosen in
+  // init_allocator() based on m_device.hasUnifiedMemory.
   // on unified memory, we could allocate beyond the recommendedMaxWorkingSetSize
-  constexpr static double default_low_watermark_ratio = 1.4;
+  constexpr static double default_low_watermark_ratio_unified = 1.4;
+  constexpr static double default_low_watermark_ratio_discrete = 1.0;
 
   const id<MTLDevice> m_device;
   std::recursive_mutex m_mutex;
@@ -414,6 +493,10 @@ class MPSHeapAllocatorImpl {
   std::shared_ptr<MPSEventPool> m_event_pool;
 
   void init_allocator();
+  // RESTORED (appears to have been missing from the pasted upstream header):
+  // builds the Kind-keyed pool map, including the two new PRIVATE_* kinds.
+  // Called once from init_allocator(); the paired .mm depends on this
+  // declaration existing.
   void init_buffer_pools();
   HeapBlock* get_free_heap(AllocParams& params);
   bool get_free_buffer(AllocParams& params);
@@ -429,7 +512,9 @@ class MPSHeapAllocatorImpl {
   // free unused cached blocks to reclaim GPU memory if memory pressure is high
   void garbage_collect_cached_buffers(AllocParams& params);
   // returns the suitable buffer pool type for the usage or
-  // requested/allocated sizes
+  // requested/allocated sizes. RESTORED FOR DISCRETE GPU SUPPORT: now also
+  // routes PRIVATE-usage requests to the PRIVATE_LARGE/PRIVATE_SMALL kinds
+  // (see the .mm implementation) instead of always falling back to shared.
   BufferPool& get_pool(size_t requested_size, size_t aligned_size, uint32_t usage);
   // returns the aligned allocation size that is optimized
   // for the buffers to get reused frequently

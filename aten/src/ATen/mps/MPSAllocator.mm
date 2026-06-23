@@ -1,4 +1,49 @@
 //  Copyright © 2022 Apple Inc.
+//
+//  MERGED (v2): this file takes the current/upstream MPSHeapAllocatorImpl
+//  (bucketed large-allocation rounding, MPSEvent-based sync, getHostAliasStorage,
+//  DeviceStats, lazy/cheap allocator construction, etc.) and re-adds the
+//  Intel-discrete-GPU memory-pressure support that upstream dropped when it
+//  started requiring `m_device.hasUnifiedMemory` unconditionally.
+//
+//  Branching rule (same as the original Intel patch set):
+//
+//    - if (m_device.hasUnifiedMemory)   -> Apple Silicon: unchanged upstream
+//      fast path, no extra null-checks (newMTLBuffer practically never
+//      returns nil here).
+//
+//    - if (!m_device.hasUnifiedMemory)  -> Intel Mac w/ discrete GPU: a
+//      tighter default low watermark (see init_allocator), restored PRIVATE
+//      storage pools (PRIVATE_LARGE / PRIVATE_SMALL), and explicit nil
+//      checks on newMTLBuffer so a fragmented/under-pressure discrete heap
+//      fails the allocation cleanly (TORCH_CHECK / OOM message) instead of
+//      a caller dereferencing a null id<MTLBuffer> (effectively 0x0).
+//
+//  A few guards (free(nullptr), get_allocated_buffer_block(nullptr),
+//  malloc(size==0), allocScalarBufferWithValue null/zero-size input) are
+//  kept UNCONDITIONAL (not gated on hasUnifiedMemory) since they are
+//  general-purpose safety nets, not discrete-GPU-specific.
+//
+//  *** HEADER CHANGES REQUIRED (MPSAllocator.h) — NOT INCLUDED IN THIS FILE ***
+//  This merge was done from the two .mm files only; the header wasn't
+//  available, so the following are ASSUMED and must be added/verified there
+//  for this file to compile:
+//    1. `enum class Kind { PRIVATE_LARGE, PRIVATE_SMALL, SHARED_LARGE,
+//        SHARED_SMALL, SCALAR };` inside BufferPool — added PRIVATE_LARGE
+//        and PRIVATE_SMALL (upstream currently only has the SHARED_* + SCALAR
+//        members).
+//    2. `UsageFlags::PRIVATE` — assumed still present (used by the old
+//        Intel patch); verify it wasn't removed when upstream dropped
+//        discrete-GPU support.
+//    3. `IMPSAllocator::isSharedStorageSupported() const` — re-add this pure
+//        virtual (upstream removed it). Used below to decide whether the
+//        shared allocator can be used for pinning/host-aliasing.
+//    4. `IMPSAllocator* getIMPSAllocator(bool sharedAllocator);` — signature
+//        change back from the current no-arg `getIMPSAllocator()`. Check all
+//        other call sites in the codebase that currently call the no-arg
+//        version.
+//  Everything else below compiles against the same BufferBlock / HeapBlock /
+//  AllocParams / BufferPool shapes already used by the current upstream file.
 
 #include <ATen/CPUFunctions.h>
 #include <ATen/EmptyTensor.h>
@@ -25,7 +70,10 @@ uint64_t HeapBlock::heap_counter = 0;
 static std::atomic<bool> s_mps_allocator_initialized{false};
 
 void MPSHeapAllocatorImpl::init_allocator() {
-  TORCH_CHECK(m_device.hasUnifiedMemory, "MPS backend is only supported on devices with unified memory");
+  // RESTORED FOR DISCRETE GPU SUPPORT: upstream currently hard-requires
+  // unified memory here. Drop that requirement — discrete GPUs are still a
+  // supported (if slower / more pressure-sensitive) configuration; the
+  // private-pool + nil-buffer checks below are what make that safe.
   init_buffer_pools();
 
   // debug verbosity flags (see DebugVerbosity enum)
@@ -37,13 +85,24 @@ void MPSHeapAllocatorImpl::init_allocator() {
       high_watermark_ratio_str ? strtod(high_watermark_ratio_str->c_str(), nullptr) : default_high_watermark_ratio;
   setHighWatermarkRatio(high_watermark_ratio);
 
+  // RESTORED FOR DISCRETE GPU SUPPORT: discrete GPUs (hasUnifiedMemory ==
+  // false) use a tighter default low watermark than unified-memory (Apple
+  // Silicon) devices. This makes the allocator trigger GC / refuse new
+  // allocations earlier, BEFORE Metal itself would return a null buffer on
+  // a discrete GPU. Combined with the nil-buffer checks gated below, this
+  // turns a silent 0x0 write into a clear, catchable TORCH_CHECK on Intel
+  // Macs.
+  const double default_low_watermark_ratio =
+      m_device.hasUnifiedMemory ? default_low_watermark_ratio_unified : default_low_watermark_ratio_discrete;
   static const auto low_watermark_ratio_str = c10::utils::get_env("PYTORCH_MPS_LOW_WATERMARK_RATIO");
   const double low_watermark_ratio =
       low_watermark_ratio_str ? strtod(low_watermark_ratio_str->c_str(), nullptr) : default_low_watermark_ratio;
   setLowWatermarkRatio(low_watermark_ratio);
 
   if (m_debug_verbosity & DebugVerbosity::PROFILING) {
-    LOG(INFO) << "Initializing heap allocator on unified device memory of size " << format_size(max_device_size());
+    LOG(INFO) << "Initializing heap allocator on "
+              << (m_device.hasUnifiedMemory ? "unified" : "discrete") << " device memory of size "
+              << format_size(max_device_size());
   }
 
   s_mps_allocator_initialized.store(true);
@@ -51,6 +110,19 @@ void MPSHeapAllocatorImpl::init_allocator() {
 
 void MPSHeapAllocatorImpl::init_buffer_pools() {
   // using a container for pools to simplify iterating over them
+
+  // RESTORED FOR DISCRETE GPU SUPPORT (and, like upstream's old behavior,
+  // created unconditionally on both Apple Silicon and discrete GPUs):
+  // Pool of large buffers with PRIVATE storage mode (GPU-only memory, not
+  // CPU-accessible). Needed any time a tensor doesn't require CPU access,
+  // and is the primary pool used on discrete GPUs to avoid the slower /
+  // more pressure-sensitive Shared-storage path.
+  m_pools.emplace(BufferPool::Kind::PRIVATE_LARGE,
+                  std::make_unique<BufferPool>(m_device, UsageFlags::PRIVATE | UsageFlags::HAZARD));
+  // Pool of small buffers with PRIVATE storage mode
+  m_pools.emplace(BufferPool::Kind::PRIVATE_SMALL,
+                  std::make_unique<BufferPool>(m_device, UsageFlags::SMALL | UsageFlags::PRIVATE | UsageFlags::HAZARD));
+
   // Pool of large buffers with shared storage mode
   m_pools.emplace(BufferPool::Kind::SHARED_LARGE,
                   std::make_unique<BufferPool>(m_device, UsageFlags::SHARED | UsageFlags::HAZARD));
@@ -66,13 +138,18 @@ void MPSHeapAllocatorImpl::init_buffer_pools() {
 
 BufferPool& MPSHeapAllocatorImpl::get_pool(size_t requested_size, size_t aligned_size, uint32_t usage) {
   BufferPool::Kind poolKind;
+  // RESTORED FOR DISCRETE GPU SUPPORT: route PRIVATE-usage requests to the
+  // private pools instead of always falling back to shared.
+  const bool isPrivate = usage & UsageFlags::PRIVATE;
 
   if (usage & UsageFlags::SCALAR) {
+    // scalar buffers are always CPU-writable, so they always come from the
+    // shared scalar pool regardless of the requested usage flags.
     poolKind = BufferPool::Kind::SCALAR;
   } else if (aligned_size <= kMaxSmallAlloc) {
-    poolKind = BufferPool::Kind::SHARED_SMALL;
+    poolKind = isPrivate ? BufferPool::Kind::PRIVATE_SMALL : BufferPool::Kind::SHARED_SMALL;
   } else {
-    poolKind = BufferPool::Kind::SHARED_LARGE;
+    poolKind = isPrivate ? BufferPool::Kind::PRIVATE_LARGE : BufferPool::Kind::SHARED_LARGE;
   }
   return *m_pools[poolKind];
 }
@@ -169,8 +246,31 @@ bool MPSHeapAllocatorImpl::alloc_buffer(AllocParams& params) {
   BufferPool& pool = *params.pool;
 
   id<MTLBuffer> buffer = heap->newMTLBuffer(params.size(), pool.usage);
+
+  // ── platform branch (RESTORED FOR DISCRETE GPU SUPPORT) ────────────────
+  // Apple Silicon (unified memory): keep the original fast path and just
+  // trust newMTLBuffer() succeeded — it practically never returns nil here.
+  //
+  // Intel discrete GPU: newMTLBuffer can legitimately return nil if the
+  // heap is fragmented or the driver is under pressure. Check explicitly
+  // and fail the allocation attempt instead of asserting/crashing on a
+  // null id<MTLBuffer> a few lines below.
+  if (!m_device.hasUnifiedMemory && buffer == nil) {
+    if (m_debug_verbosity & DebugVerbosity::ALLOCATIONS) {
+      LOG(INFO) << "WARNING: newMTLBuffer returned nil for size " << format_size(params.size()) << " on "
+                << ((pool.usage & UsageFlags::SHARED) ? "shared" : "private")
+                << " pool (discrete GPU). Falling back to allocation-failed path.";
+    }
+    // re-insert the heap we just pulled out so accounting stays correct,
+    // then signal failure up the call chain (alloc_buffer_block will retry
+    // via GC / release_cached_buffers / eventually TORCH_CHECK with a
+    // proper OOM message instead of a 0x0 write).
+    pool.heaps.insert(heap);
+    return false;
+  }
   // this should never happen as the backing memory (i.e., heap) was allocated successfully.
   TORCH_INTERNAL_ASSERT(buffer);
+
   // insert heap after a buffer was created on it to update the order of heap's set
   pool.heaps.insert(heap);
   params.buffer_block = new BufferBlock(params.size(), params.requested_size, buffer, heap);
@@ -307,6 +407,10 @@ BufferBlock* MPSHeapAllocatorImpl::alloc_buffer_block(size_t size, uint32_t usag
   //   1- the High Watermark limit has been reached (if enabled)
   //   2- ran out of device memory, or the memory fragmentation is so high that a contiguous
   //      chunk of requested size couldn't be found.
+  //   3- (RESTORED FOR DISCRETE GPU SUPPORT) on a discrete GPU under pressure,
+  //      newMTLBuffer returned nil — alloc_buffer() reports this as
+  //      block_found == false instead of crashing, so it surfaces here as
+  //      the same clear OOM message below.
   if (!block_found || !buffer_block) {
     if (m_high_watermark_ratio > 0.0) {
       TORCH_CHECK(
@@ -335,6 +439,22 @@ BufferBlock* MPSHeapAllocatorImpl::alloc_buffer_block(size_t size, uint32_t usag
                   " pool.");
     }
   }
+
+  // ── platform branch (RESTORED FOR DISCRETE GPU SUPPORT) ────────────────
+  // Intel discrete GPU only: last line of defense. Even though the branch
+  // above should already have thrown via TORCH_CHECK(false, ...), never let
+  // a null buffer_block->buffer reach the caller on a discrete GPU — this
+  // guards against any future code path on that platform that forgets to
+  // check block_found before touching buffer_block. On Apple Silicon we
+  // keep the original behavior (no extra check) since this situation does
+  // not occur there in practice.
+  if (!m_device.hasUnifiedMemory) {
+    TORCH_CHECK(buffer_block != nullptr && buffer_block->buffer != nil,
+                "MPS allocator returned a null buffer block unexpectedly "
+                "(requested ", format_size(alloc_size), "). Refusing to "
+                "hand back a buffer that would be written at address 0x0.");
+  }
+
   buffer_block->in_use = true;
   buffer_block->use_count++;
   m_current_allocated_memory.increase(buffer_block->size);
@@ -343,6 +463,18 @@ BufferBlock* MPSHeapAllocatorImpl::alloc_buffer_block(size_t size, uint32_t usag
 }
 
 void MPSHeapAllocatorImpl::free_buffer(BufferBlock* buffer_block) {
+  // ── platform branch (RESTORED FOR DISCRETE GPU SUPPORT) ────────────────
+  // Intel discrete GPU only: guard against freeing a null block — can
+  // happen if a caller upstream raced with an allocation failure (see
+  // alloc_buffer() above) and still tried to release "whatever it got
+  // back". Apple Silicon keeps the original direct-assert fast path below
+  // since a null buffer_block never reaches here in practice there.
+  if (!m_device.hasUnifiedMemory && buffer_block == nullptr) {
+    if (m_debug_verbosity & DebugVerbosity::RELEASES) {
+      LOG(INFO) << "WARNING: free_buffer() called with a null buffer_block, ignoring.";
+    }
+    return;
+  }
   TORCH_INTERNAL_ASSERT(buffer_block->in_use);
 
   BufferPool& pool = *buffer_block->heap->pool;
@@ -360,6 +492,13 @@ void MPSHeapAllocatorImpl::free_buffer(BufferBlock* buffer_block) {
 }
 
 BufferBlock* MPSHeapAllocatorImpl::get_allocated_buffer_block(const void* ptr) {
+  // NOTE: universal guard, not platform-specific — kept unconditional.
+  // Looking up address 0x0 in m_allocated_buffers should never succeed, but
+  // bailing out early makes the failure mode explicit instead of relying on
+  // map.find() behaving correctly on a garbage key, on any GPU.
+  if (ptr == nullptr) {
+    return nullptr;
+  }
   auto it = m_allocated_buffers.find(ptr);
   if (it == m_allocated_buffers.end()) {
     return nullptr;
@@ -487,6 +626,8 @@ bool MPSHeapAllocatorImpl::release_cached_buffers() {
   });
   m_mutex.lock();
   // Free all cached blocks to system allocator
+  // (NOTE: iterating m_pools automatically picks up the restored
+  // PRIVATE_LARGE / PRIVATE_SMALL pools too — no change needed here.)
   for (const auto& poolIt : m_pools) {
     BufferPool& pool = *poolIt.second;
     release_buffers(pool);
@@ -550,6 +691,17 @@ void MPSHeapAllocatorImpl::garbage_collect_cached_buffers(AllocParams& params) {
 id<MTLBuffer> MPSHeapAllocatorImpl::malloc(size_t size, uint32_t usage) {
   std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
+  // NOTE: universal guard, not platform-specific — kept unconditional.
+  // Reject zero-size requests explicitly instead of letting them silently
+  // flow into alloc_buffer_block and potentially produce a degenerate
+  // buffer, on any GPU.
+  if (size == 0) {
+    if (m_debug_verbosity & DebugVerbosity::ALLOCATIONS) {
+      LOG(INFO) << "WARNING: malloc() called with size == 0, returning nil.";
+    }
+    return nullptr;
+  }
+
   BufferBlock* buffer_block = alloc_buffer_block(size, usage);
   return buffer_block ? buffer_block->buffer : nullptr;
 }
@@ -563,6 +715,12 @@ bool MPSHeapAllocatorImpl::isSharedBuffer(const void* ptr) {
 }
 
 id<MTLBuffer> MPSHeapAllocatorImpl::allocScalarBufferWithValue(void* value, size_t size) {
+  // NOTE: universal guards, not platform-specific — kept unconditional.
+  // Refuse to memcpy from a null source pointer or a zero size; previously
+  // unguarded and would crash (or silently read garbage) regardless of GPU.
+  TORCH_CHECK(value != nullptr, "allocScalarBufferWithValue() called with a null value pointer");
+  TORCH_CHECK(size > 0, "allocScalarBufferWithValue() called with size == 0");
+
   BufferBlock* buffer_block = nullptr;
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -725,6 +883,15 @@ IntArrayRef MPSHeapAllocatorImpl::getBufferShape(const void* ptr) {
 }
 
 void MPSHeapAllocatorImpl::free(void* ptr) {
+  // NOTE: universal guard, not platform-specific — kept unconditional.
+  // Freeing a null pointer is a silent no-op everywhere else in C/C++
+  // (matches `free(NULL)` semantics), so make that contract explicit here
+  // too instead of falling through into get_allocated_buffer_block(nullptr)
+  // and tripping the TORCH_INTERNAL_ASSERT below, on any GPU.
+  if (ptr == nullptr) {
+    return;
+  }
+
   BufferBlock* buffer_block = nullptr;
   {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -821,6 +988,10 @@ struct TORCH_API MPSAllocator final : public IMPSAllocator {
   // Construction is intentionally cheap (no Metal access) so the allocator can
   // be registered with c10 at static-init time without forcing MPS/Metal
   // initialization in processes that never touch the MPS device.
+  // (RESTORED FOR DISCRETE GPU SUPPORT note: hasUnifiedMemory is therefore
+  // NOT cached here — see isSharedStorageSupported() below, which queries it
+  // lazily at call time instead, to preserve this cheap-construction
+  // contract.)
   explicit MPSAllocator(uint32_t Usage) : m_usage(Usage) {}
 
   // No destructor: the underlying MPSHeapAllocatorImpl singleton empties its own
@@ -848,6 +1019,14 @@ struct TORCH_API MPSAllocator final : public IMPSAllocator {
   }
   bool isSharedBuffer(const void* ptr) const override {
     return _getAllocImpl().isSharedBuffer(ptr);
+  }
+  // RESTORED FOR DISCRETE GPU SUPPORT *** REQUIRES HEADER CHANGE ***
+  // Pinning/host-aliasing relies on Shared storage being meaningfully
+  // CPU-fast; only true on unified-memory (Apple Silicon) devices. Queried
+  // lazily (not cached in a member) so constructing this allocator at
+  // static-init time never touches Metal — see the constructor comment.
+  bool isSharedStorageSupported() const override {
+    return _getAllocImpl().Device().hasUnifiedMemory;
   }
   // c10::DeviceAllocator interface
   bool initialized() override {
@@ -934,6 +1113,7 @@ struct TORCH_API MPSAllocator final : public IMPSAllocator {
   uint32_t m_usage;
 
   static void Delete(void* ptr) {
+    // NOTE: universal guard, not platform-specific — kept unconditional.
     if (ptr) {
       _getAllocImpl().free(ptr);
     }
@@ -944,6 +1124,15 @@ namespace {
 MPSAllocator& _getSharedAllocator() {
   static MPSAllocator s_mps_shared_alloc(HeapAllocator::UsageFlags::SHARED);
   return s_mps_shared_alloc;
+}
+
+// RESTORED FOR DISCRETE GPU SUPPORT: a PRIVATE-storage allocator, mirroring
+// the pre-unified-memory-only design. Used for tensors that don't need CPU
+// access and, on a discrete GPU, are the primary/cheaper allocation path
+// (Private storage avoids the PCIe-shared-memory overhead of Shared mode).
+MPSAllocator& _getPrivateAllocator() {
+  static MPSAllocator s_mps_private_alloc(HeapAllocator::UsageFlags::PRIVATE);
+  return s_mps_private_alloc;
 }
 
 // Register the shared allocator as the c10 allocator for MPS at static-init
@@ -960,10 +1149,22 @@ static MPSAllocatorRegisterer s_mps_allocator_registerer;
 
 } // anonymous namespace
 
-IMPSAllocator* getIMPSAllocator() {
-  // MPS requires unified memory (enforced in MPSHeapAllocatorImpl::init_allocator),
-  // so the shared allocator is always usable.
-  return &_getSharedAllocator();
+// RESTORED FOR DISCRETE GPU SUPPORT *** REQUIRES HEADER CHANGE ***
+// Signature restored to take a `sharedAllocator` flag (upstream's current
+// no-arg getIMPSAllocator() always returned the shared one). On a discrete
+// GPU where Shared storage isn't considered "fast enough" to back pinned
+// memory (isSharedStorageSupported() == false), requesting the shared
+// allocator now returns nullptr instead of a misleadingly-usable pointer —
+// callers (e.g. pin_memory) must already handle a null IMPSAllocator*.
+IMPSAllocator* getIMPSAllocator(bool sharedAllocator) {
+  if (!sharedAllocator) {
+    return &_getPrivateAllocator();
+  }
+  auto& sa = _getSharedAllocator();
+  if (sa.isSharedStorageSupported()) {
+    return &sa;
+  }
+  return nullptr;
 }
 
 // torch.is_pinned() implementation
