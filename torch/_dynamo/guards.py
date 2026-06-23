@@ -64,6 +64,7 @@ from torch._C._dynamo.guards import (
     GuardManager,
     install_no_tensor_aliasing_guard,
     install_object_aliasing_guard,
+    install_object_aliasing_root_guard,
     install_storage_overlapping_guard,
     install_symbolic_shape_guard,
     LeafGuard,
@@ -856,6 +857,54 @@ def get_verbose_code_parts(
     return verbose_code_parts
 
 
+def _object_aliasing_source_to_steps(
+    source: Source,
+) -> list[tuple[bool, Any]] | None:
+    """Convert a Source into (is_attr, key) steps applied from the locals dict,
+    for the C++ OBJECT_ALIASING_ROOT guard. is_attr -> getattr(key), else
+    getitem(key). Returns None for anything that is not a simple locals-rooted
+    attr/getitem chain (globals, cells, slices, non-str/int keys, or other
+    source types), so the caller falls back to a python lambda guard.
+    """
+    steps: list[tuple[bool, Any]] = []
+    cur: Source = source
+    while True:
+        if isinstance(cur, LocalSource):
+            if cur.is_derefed_cell_contents:
+                return None
+            steps.append((False, cur.local_name))
+            break
+        elif isinstance(cur, AttrSource):
+            steps.append((True, cur.member))
+            cur = cur.base
+        elif isinstance(cur, DictGetItemSource):
+            if type(cur.index) not in (str, int):
+                return None
+            steps.append((False, cur.index))
+            cur = cur.base
+        elif isinstance(cur, GetItemSource):
+            if cur.index_is_slice or type(cur.index) not in (str, int):
+                return None
+            steps.append((False, cur.index))
+            cur = cur.base
+        elif isinstance(
+            cur,
+            (
+                NNModuleSource,
+                UnspecializedNNModuleSource,
+                UnspecializedBuiltinNNModuleSource,
+                FSDPNNModuleSource,
+            ),
+        ):
+            # Transparent nn.Module source markers: resolve to the same object
+            # as their base, so they add no access step.
+            cur = cur.base
+        else:
+            return None
+    steps.reverse()
+    return steps
+
+
 def _get_closure_var_hint(source: Source | None) -> str | None:
     """
     Walk up the source chain to find a CellContentsSource ancestor.
@@ -1290,7 +1339,8 @@ class GuardBuilder(GuardBuilderBase):
         # Save the guard managers to avoid repeatedly traversing sources.
         self._cached_guard_managers: dict[str, GuardManager] = {}
         self._cached_duplicate_input_guards: set[tuple[str, str]] = set()
-        self.object_aliasing_guard_codes: list[tuple[str, str]] = []
+        # (source_a, source_b, code_part, verbose_code_part) per aliasing pair.
+        self.object_aliasing_guard_codes: list[tuple[Source, Source, str, str]] = []
         self.guard_nn_modules = config.guard_nn_modules and justknobs_check(
             "pytorch/compiler:guard_nn_modules"
         )
@@ -3083,7 +3133,9 @@ class GuardBuilder(GuardBuilderBase):
             # get more information.
             code_part = code[0]
             verbose_code_part = get_verbose_code_parts(code_part, guard)[0]
-            self.object_aliasing_guard_codes.append((code_part, verbose_code_part))
+            self.object_aliasing_guard_codes.append(
+                (guard.originating_source, source_b, code_part, verbose_code_part)
+            )
         else:
             install_object_aliasing_guard(
                 self.get_guard_manager(guard),
@@ -4920,20 +4972,43 @@ class CheckFunctionManager:
         # but that undermined the recursive-dict guard optimization: placing the
         # aliasing guard at a leaf prevented the parent dict node from
         # qualifying as a recursive-dict guard root. Because aliasing guards are
-        # rare, we now emit them as epilogue guards via a small Python lambda.
-        # This repeats the access in Python—adding a bit of work—but the
-        # overhead is outweighed by the gains from enabling recursive-dict guard
-        # optimization.
+        # rare, we emit them as root epilogue guards that re-read the objects.
+        # When both sides resolve to a simple locals-rooted attr/getitem chain,
+        # we install a single C++ epilogue guard (OBJECT_ALIASING_ROOT) that
+        # replays the access in C++; otherwise we fall back to a Python lambda.
+        # Both stay at the root, so the recursive-dict guard optimization is
+        # preserved.
         if (
             config.use_lamba_guard_for_object_aliasing
             and builder.object_aliasing_guard_codes
         ):
-            aliasing_code_parts, aliasing_verbose_code_parts = map(
-                list, zip(*builder.object_aliasing_guard_codes)
-            )
-            builder.add_python_lambda_leaf_guard_to_root(
-                aliasing_code_parts, aliasing_verbose_code_parts
-            )
+            _Steps = list[tuple[bool, Any]]
+            cpp_pairs: list[tuple[_Steps, _Steps]] = []
+            cpp_verbose: list[str] = []
+            lambda_code_parts: list[str] = []
+            lambda_verbose: list[str] = []
+            for (
+                source_a,
+                source_b,
+                code_part,
+                verbose_code_part,
+            ) in builder.object_aliasing_guard_codes:
+                steps_a = _object_aliasing_source_to_steps(source_a)
+                steps_b = _object_aliasing_source_to_steps(source_b)
+                if steps_a is not None and steps_b is not None:
+                    cpp_pairs.append((steps_a, steps_b))
+                    cpp_verbose.append(verbose_code_part)
+                else:
+                    lambda_code_parts.append(code_part)
+                    lambda_verbose.append(verbose_code_part)
+            if cpp_pairs:
+                install_object_aliasing_root_guard(
+                    builder.guard_manager.root, cpp_pairs, cpp_verbose, None
+                )
+            if lambda_code_parts:
+                builder.add_python_lambda_leaf_guard_to_root(
+                    lambda_code_parts, lambda_verbose
+                )
 
         aotautograd_guards: list[GuardEnvExpr] = (
             self.output_graph.aotautograd_guards if self.output_graph else []

@@ -2521,6 +2521,99 @@ class OBJECT_ALIASING : public RelationalGuard {
   PyObject* _first_tensor{nullptr};
 };
 
+// Checks object-aliasing relations ("a is b") entirely from the root locals by
+// re-resolving each side's access path in C++. Installed as a single root
+// epilogue guard (NOT attached to leaf managers), so unlike the relational
+// OBJECT_ALIASING leaf guard it does not disable the recursive-dict-tag
+// optimization: a relational leaf guard breaks if one side's subtree is
+// tag-skipped while the other is traversed, whereas this guard re-reads both
+// sides independently after traversal.
+//
+// Each side is a "path": a sequence of (is_attr, key) steps applied from the
+// root value (the locals dict). is_attr -> PyObject_GetAttr, else
+// PyObject_GetItem. The Python side only builds paths it can resolve this way
+// (locals-rooted attr/getitem chains) and falls back to a python lambda guard
+// for anything else, so unsupported sources never reach here.
+class OBJECT_ALIASING_ROOT : public LeafGuard {
+ public:
+  OBJECT_ALIASING_ROOT(
+      RootGuardManager* root_guard_manager,
+      const py::list& pairs,
+      py::object verbose_code_parts,
+      py::object user_stack)
+      : LeafGuard(
+            root_guard_manager,
+            std::move(verbose_code_parts),
+            std::move(user_stack)) {
+    for (const auto& pair : pairs) {
+      auto t = py::cast<py::tuple>(pair);
+      _pairs.emplace_back(
+          compile_path(py::cast<py::list>(t[0])),
+          compile_path(py::cast<py::list>(t[1])));
+    }
+  }
+
+  bool check_nopybind(PyObject* value) override { // value: locals dict (borrowed)
+    for (const auto& p : _pairs) {
+      PyObject* a = resolve(value, p.first); // new ref or nullptr
+      if (a == nullptr) {
+        PyErr_Clear();
+        return false;
+      }
+      PyObject* b = resolve(value, p.second); // new ref or nullptr
+      if (b == nullptr) {
+        PyErr_Clear();
+        Py_DECREF(a);
+        return false;
+      }
+      bool same = (a == b);
+      Py_DECREF(a);
+      Py_DECREF(b);
+      if (!same) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+ private:
+  struct Step {
+    bool is_attr;
+    py::object key;
+  };
+  using Path = std::vector<Step>;
+
+  static Path compile_path(const py::list& steps) {
+    Path path;
+    path.reserve(steps.size());
+    for (const auto& step : steps) {
+      auto t = py::cast<py::tuple>(step);
+      path.push_back(
+          Step{py::cast<bool>(t[0]), py::reinterpret_borrow<py::object>(t[1])});
+    }
+    return path;
+  }
+
+  // Returns a new reference to the resolved object, or nullptr with the Python
+  // error set (caller clears it).
+  static PyObject* resolve(PyObject* root, const Path& path) {
+    PyObject* cur = root;
+    Py_INCREF(cur);
+    for (const auto& step : path) {
+      PyObject* nxt = step.is_attr ? PyObject_GetAttr(cur, step.key.ptr())
+                                   : PyObject_GetItem(cur, step.key.ptr());
+      Py_DECREF(cur);
+      if (nxt == nullptr) {
+        return nullptr;
+      }
+      cur = nxt;
+    }
+    return cur;
+  }
+
+  std::vector<std::pair<Path, Path>> _pairs;
+};
+
 /**
  * Checks that none of the tensors alias.
  */
@@ -7122,6 +7215,19 @@ void install_object_aliasing_guard(
   y->add_permitted_leaf_guard(guard);
 }
 
+void install_object_aliasing_root_guard(
+    RootGuardManager* root,
+    const py::list& pairs,
+    py::object verbose_code_parts,
+    py::object user_stack) {
+  // Installs a single root epilogue guard that checks all object-aliasing
+  // relations by re-resolving their access paths from the locals dict. Unlike
+  // install_object_aliasing_guard, it does not touch leaf managers, so it
+  // preserves the recursive-dict-tag optimization.
+  root->add_epilogue_lambda_guard(std::make_unique<OBJECT_ALIASING_ROOT>(
+      root, pairs, std::move(verbose_code_parts), std::move(user_stack)));
+}
+
 void install_no_tensor_aliasing_guard(
     const py::list& guard_managers,
     const py::list& tensor_names,
@@ -8667,6 +8773,8 @@ PyObject* torch_c_dynamo_guards_init() {
           py::return_value_policy::reference);
 
   py_m.def("install_object_aliasing_guard", install_object_aliasing_guard);
+  py_m.def(
+      "install_object_aliasing_root_guard", install_object_aliasing_root_guard);
   py_m.def(
       "install_no_tensor_aliasing_guard", install_no_tensor_aliasing_guard);
   py_m.def(
