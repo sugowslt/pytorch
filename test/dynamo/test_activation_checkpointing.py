@@ -1919,7 +1919,6 @@ Non-primal fwd outputs from model w/o backward hook: {mod_no_hook_fwd_outputs_no
         self.assertEqual(ref, res)
 
     @requires_cuda_and_triton
-    @torch._inductor.config.patch(fx_graph_cache=False)
     def test_pattern_matcher(self, device):
         # Check that the sdpa op is recomputed in the backward graph
         # tests percolate_tags
