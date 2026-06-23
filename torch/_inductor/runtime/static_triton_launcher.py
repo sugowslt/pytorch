@@ -9,6 +9,16 @@ from .triton_compat import ASTSource, CompiledKernel, knobs as triton_knobs
 from .triton_helpers import get_constexprs
 
 
+@functools.lru_cache(None)
+def _tma_arg_helpers():
+    """Cached (make_tensordesc_arg, TensorDescriptor) for host-side TMA arg
+    expansion -- avoids re-importing on the hot launch path."""
+    from triton.backends.nvidia.driver import make_tensordesc_arg
+    from triton.tools.tensor_descriptor import TensorDescriptor
+
+    return make_tensordesc_arg, TensorDescriptor
+
+
 class StaticallyLaunchedTritonKernel:
     """
     Parses the metadata of a CompiledKernel from Triton into a structure that can
@@ -87,7 +97,9 @@ class StaticallyLaunchedTritonKernel:
         self.num_warps = kernel.metadata.num_warps
         self.shared = (
             # pyrefly: ignore [missing-attribute]
-            kernel.shared if hasattr(kernel, "shared") else kernel.metadata.shared
+            kernel.shared
+            if hasattr(kernel, "shared")
+            else kernel.metadata.shared
         )
 
         def needs_scratch_arg(scratch_name: str, param_name: str) -> bool:
@@ -108,6 +120,11 @@ class StaticallyLaunchedTritonKernel:
         # same situation for profile scratch - triton-lang/triton#7258
         self.has_profile_scratch = needs_scratch_arg("Profile", "profile_scratch_size")
 
+        # Host-side TMA: tensordesc<> args expand to a CUtensorMap (+ shape /
+        # strides). Per-descriptor metadata decides nvTmaDesc vs decomposed.
+        # pyrefly: ignore [missing-attribute]
+        self.tensordesc_meta = getattr(kernel.metadata, "tensordesc_meta", None)
+        self._has_tensordesc = False
         # pyrefly: ignore [missing-attribute]
         self.arg_tys = self.arg_ty_from_signature(kernel.src)
         self.function: int | None = None  # Loaded by load_kernel(on the parent process)
@@ -199,9 +216,35 @@ class StaticallyLaunchedTritonKernel:
         """
         if ty[0] == "*":
             return "O"
-        elif ty == "nvTmaDesc" or ty.startswith("tensordesc<"):
-            raise NotImplementedError("TMA descriptor kernels are not yet supported")
+        elif ty == "nvTmaDesc":
+            # Host-side TMA descriptor: a 128-byte CUtensorMap passed by value.
+            return "M"
         return StaticallyLaunchedTritonKernel.type_mappings()[ty]
+
+    def _expand_tensordesc_type(self, ty: str) -> str:
+        """Expand a tensordesc<dtype[shape]> signature entry into the per-arg
+        type chars triton lowers it to (mirrors nvidia driver expand_signature):
+        nvTmaDesc path -> CUtensorMap + shape(i32) + strides(i64); host-decomposed
+        path -> base ptr + shape/strides(i64) + 2 flags + shape(i32) + strides(i64).
+        """
+        import re
+
+        match = re.match(r"tensordesc<([^\[>]*)\[([^\]]*)\]", ty)
+        if match is None:
+            raise NotImplementedError(f"Could not parse tensordesc type: {ty}")
+        ndim = match.group(2).count(",") + 1
+        meta = self.tensordesc_meta
+        idx = self._tensordesc_idx
+        self._tensordesc_idx += 1
+        per_desc_meta = meta[idx] if meta else None
+        if per_desc_meta is None:
+            # Host-decomposed: *dtype, i64*2ndim, i1, i1, i32*ndim, i64*ndim
+            chars = ["O"] + ["l"] * (2 * ndim) + ["i", "i"]
+        else:
+            # nvTmaDesc: CUtensorMap by value
+            chars = ["M"]
+        chars += ["i"] * ndim + ["l"] * ndim
+        return "".join(chars)
 
     def arg_ty_from_signature(self, src: ASTSource) -> str:
         def index_key(i: Any) -> int:
@@ -227,6 +270,7 @@ class StaticallyLaunchedTritonKernel:
         # completely ignores the constexprs passed into it when generating code.
         # So we can ignore them here too
         params = []
+        self._tensordesc_idx = 0
 
         for i in sorted(signature.keys()):
             ty = signature[i]
@@ -235,6 +279,10 @@ class StaticallyLaunchedTritonKernel:
             # so we check both here
             if ty == "constexpr" or i in constants:
                 pass
+            elif isinstance(ty, str) and ty.startswith("tensordesc<"):
+                # Host-side TMA descriptor arg; expands to several kernel params.
+                self._has_tensordesc = True
+                params.append(self._expand_tensordesc_type(ty))
             else:
                 # pyrefly: ignore [bad-argument-type]
                 params.append(self.extract_type(ty))
@@ -249,6 +297,25 @@ class StaticallyLaunchedTritonKernel:
         # and reload them.
         state["cubin_path"] = None
         return state
+
+    def _expand_tma_args(self, args: tuple[object, ...]) -> tuple[object, ...]:
+        """Expand each host-side TMA TensorDescriptor arg into the flat kernel
+        params triton's launcher would produce (CUtensorMap + shape + strides),
+        so the args match the expanded type string from arg_ty_from_signature.
+        """
+        make_tensordesc_arg, TensorDescriptor = _tma_arg_helpers()
+
+        meta = self.tensordesc_meta
+        out: list[object] = []
+        td_idx = 0
+        for arg in args:
+            if isinstance(arg, TensorDescriptor):
+                per_desc_meta = meta[td_idx] if meta else None
+                td_idx += 1
+                out.extend(make_tensordesc_arg(arg, per_desc_meta))
+            else:
+                out.append(arg)
+        return tuple(out)
 
     def run(
         self,
@@ -268,6 +335,9 @@ class StaticallyLaunchedTritonKernel:
         # throw an exception. But if inductor is the only one calling this
         # thing, it should always match.
         # Get rid of constants before passing to cubin launcher
+
+        if self._has_tensordesc:
+            args = self._expand_tma_args(args)
 
         arg_tys = self.arg_tys
 
