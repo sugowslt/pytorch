@@ -101,6 +101,76 @@ class GuardManagerTests(torch._dynamo.test_case.TestCase):
 
         self.assertEqual(actual, fn(x))
 
+    def test_object_aliasing_root_guard(self):
+        # The C++ OBJECT_ALIASING_ROOT guard re-reads aliased objects from the
+        # locals and compares identity as a single root epilogue guard (so it
+        # preserves the recursive-dict-tag optimization instead of disabling it
+        # like a relational leaf guard would). Verify it engages, is correct,
+        # and survives a clone. Skips if it is not installed (e.g. globals/
+        # unsupported sources force the python-lambda fallback).
+        import torch._dynamo.guards as dynamo_guards
+
+        class Shared:
+            def __init__(self):
+                self.flag = True
+
+        class Layer(torch.nn.Module):
+            def __init__(self, shared):
+                super().__init__()
+                self.shared = shared
+                self.lin = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                if self.shared.flag:
+                    x = x + 1
+                return self.lin(x)
+
+        class Net(torch.nn.Module):
+            def __init__(self, n):
+                super().__init__()
+                shared = Shared()
+                self.layers = torch.nn.ModuleList([Layer(shared) for _ in range(n)])
+
+            def forward(self, x):
+                for layer in self.layers:
+                    x = layer(x)
+                return x
+
+        torch._dynamo.reset()
+        installed = []
+        orig = dynamo_guards.install_object_aliasing_root_guard
+
+        def spy(*args, **kwargs):
+            installed.append(True)
+            return orig(*args, **kwargs)
+
+        model = Net(4)
+        with (
+            torch._dynamo.config.patch(use_recursive_dict_tags_for_guards=True),
+            mock.patch.object(dynamo_guards, "install_object_aliasing_root_guard", spy),
+        ):
+            torch.compile(model, backend="eager", fullgraph=True)(torch.randn(8))
+
+        if not installed:
+            self.skipTest("object-aliasing root guard not installed")
+
+        root = _debug_get_cache_entry_list(type(model).forward.__code__)[
+            0
+        ].guard_manager.root
+        f_locals = {"self": model, "x": torch.randn(8)}
+
+        # Valid (all layers share one object) passes, on the tree and a clone.
+        for manager in (root, root.clone_manager(lambda _: True)):
+            self.assertTrue(manager.check(f_locals))
+
+        # Breaking the aliasing (a layer points at a different object) fails,
+        # and restoring it passes again (no stale state).
+        saved = model.layers[1].shared
+        model.layers[1].shared = Shared()
+        self.assertFalse(root.check(f_locals))
+        model.layers[1].shared = saved
+        self.assertTrue(root.check(f_locals))
+
     def test_guard_debug_info_user_stack(self):
         """Test that GuardDebugInfo can store user stack trace information."""
         import traceback

@@ -449,6 +449,12 @@ def install_object_aliasing_guard(
     verbose_code_parts: list[str],
     user_stack: traceback.StackSummary | None,
 ) -> None: ...
+def install_object_aliasing_root_guard(
+    root: RootGuardManager,
+    pairs: list[tuple[list[tuple[bool, Any]], list[tuple[bool, Any]]]],
+    verbose_code_parts: list[str],
+    user_stack: traceback.StackSummary | None,
+) -> None: ...
 def install_no_tensor_aliasing_guard(
     guard_managers: list[GuardManager],
     tensor_names: list[str],
