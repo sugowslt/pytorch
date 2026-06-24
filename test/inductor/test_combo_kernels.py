@@ -1844,7 +1844,7 @@ class ComboKernelTestsMaxAutotune(TestCase):
         self.assertEqual(
             len(group_indices),
             2,
-            f"Expected 2 autotune groups, got {group_lines}",
+            lambda msg: f"{msg}\nExpected 2 autotune groups, got {group_lines}",
         )
         self.assertEqual(out_eager, out_compiled)
         self.assertEqual(torch._inductor.metrics.generated_kernel_count, 1)
@@ -1941,7 +1941,7 @@ class ComboKernelTestsMaxAutotune(TestCase):
                 self.assertEqual(
                     len(groups),
                     expected_groups,
-                    f"{desc}: expected {expected_groups} group(s), got {len(groups)}",
+                    lambda msg: f"{msg}\n{desc}: expected {expected_groups} group(s), got {len(groups)}",
                 )
 
     @requires_gpu_and_triton
@@ -2029,7 +2029,7 @@ class ComboKernelTestsMaxAutotune(TestCase):
         self.assertEqual(
             changed_fields,
             {"XBLOCK_1"},
-            f"Expected the first combo coordesc step to tune the largest subkernel first, got {changed_fields}",
+            lambda msg: f"{msg}\nExpected the first combo coordesc step to tune the largest subkernel first, got {changed_fields}",
         )
 
 

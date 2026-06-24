@@ -697,7 +697,7 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
             self.assertEqual(
                 out[j],
                 torch.full_like(out[j], expected),
-                msg=f"rank {self.rank}: out[{j}] should contain the reduced sum",
+                msg=lambda msg: f"{msg}\nrank {self.rank}: out[{j}] should contain the reduced sum",
             )
         # Source buffer must be unmodified.
         for i in range(n_experts):
@@ -713,7 +713,7 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
                     dtype=torch.float,
                     device=self.device,
                 ),
-                msg=f"rank {self.rank}: source buffer block {i} should be unchanged",
+                msg=lambda msg: f"{msg}\nrank {self.rank}: source buffer block {i} should be unchanged",
             )
 
     @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")
@@ -782,7 +782,7 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
             self.assertEqual(
                 out[j],
                 torch.full_like(out[j], expected),
-                msg=f"rank {self.rank}: out[{j}] should contain the reduced sum",
+                msg=lambda msg: f"{msg}\nrank {self.rank}: out[{j}] should contain the reduced sum",
             )
 
     @skip_but_pass_in_sandcastle_if(TEST_WITH_ROCM, "Skip NCCL tests for ROCm")

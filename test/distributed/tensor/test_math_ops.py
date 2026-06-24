@@ -469,7 +469,7 @@ class DistMathOpsTest(DTensorTestBase):
             self.assertEqual(
                 sum(comm_mode.comm_module_counts["Global"]["forward"].values()),
                 expected_fwd_comm,
-                f"comm count={comm_mode.get_total_counts()}, norm_type={norm_type.__name__}, "
+                lambda msg: f"{msg}\ncomm count={comm_mode.get_total_counts()}, norm_type={norm_type.__name__}, "
                 f"shard_dim={shard_dim}, norm_shape={normalized_shape}, elem_affine={elementwise_affine}",
             )
 
@@ -483,7 +483,7 @@ class DistMathOpsTest(DTensorTestBase):
             self.assertEqual(
                 sum(comm_mode.comm_module_counts["Global"]["backward"].values()),
                 expected_bwd_comm,
-                f"comm count={comm_mode.get_total_counts()}, norm_type={norm_type.__name__}, "
+                lambda msg: f"{msg}\ncomm count={comm_mode.get_total_counts()}, norm_type={norm_type.__name__}, "
                 f"shard_dim={shard_dim}, norm_shape={normalized_shape}, elem_affine={elementwise_affine}",
             )
 
@@ -743,7 +743,7 @@ class DistMathOpsTest(DTensorTestBase):
             self.assertEqual(
                 dist_x.grad.full_tensor(),
                 x.grad,
-                msg=f"topk_dim={topk_dim}, shard_dim={shard_dim}",
+                msg=lambda msg: f"{msg}\ntopk_dim={topk_dim}, shard_dim={shard_dim}",
             )
             x.grad.zero_()
 
@@ -1579,7 +1579,7 @@ class DistMathOpsTest(DTensorTestBase):
             self.assertEqual(
                 allreduce_count,
                 expected_allreduce_count,
-                f"reduction='{reduction}': expected {expected_allreduce_count} "
+                lambda msg: f"{msg}\nreduction='{reduction}': expected {expected_allreduce_count} "
                 f"backward all-reduce(s), got {allreduce_count}. "
                 f"Full comm counts: {pformat(dict(comm_mode.get_comm_counts()))}",
             )
@@ -1732,7 +1732,7 @@ class DistMathOpsTest(DTensorTestBase):
                     self.assertEqual(
                         comm_mode.get_total_counts(),
                         0,
-                        f"Unexpected communication for "
+                        lambda msg: f"{msg}\nUnexpected communication for "
                         f"{kwargs['mode']} with {placements}",
                     )
 

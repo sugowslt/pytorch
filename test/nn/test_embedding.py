@@ -746,7 +746,7 @@ class TestEmbeddingNNDeviceType(NNTestCase):
                 self.assertEqual(
                     embedding.weight.grad[i].abs().sum(),
                     0,
-                    f"Expected zero gradient for unused index {i}",
+                    lambda msg: f"{msg}\nExpected zero gradient for unused index {i}",
                 )
 
         # Test correctness by comparing with a reference computation
@@ -814,7 +814,7 @@ class TestEmbeddingNNDeviceType(NNTestCase):
         self.assertEqual(
             embedding.weight.grad[padding_idx].abs().sum(),
             0,
-            f"Expected zero gradient for padding_idx {padding_idx}",
+            lambda msg: f"{msg}\nExpected zero gradient for padding_idx {padding_idx}",
         )
 
         # Verify other used indices have non-zero gradients
