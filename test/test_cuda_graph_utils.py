@@ -527,6 +527,69 @@ class TestMarkKernels(TestCase):
         self.assertEqual(graph_ids_by_name["graph_a"], {exec_a})
         self.assertEqual(graph_ids_by_name["graph_b"], {exec_b})
 
+    def _assert_keyed_to(self, exec_graph_id):
+        annotations = get_kernel_annotations()
+        self.assertGreater(len(annotations), 0)
+        for tools_id in annotations:
+            self.assertEqual(tools_id >> 32, exec_graph_id)
+
+    @parametrize("trigger", ["instantiate", "replay"])
+    def test_keep_graph_true_remaps_on_first_instantiation(self, trigger):
+        """With keep_graph=True the exec graph is not instantiated at
+        capture_end, so the context exit must not error and the remap must be
+        deferred until the graph is instantiated -- whether that happens via an
+        explicit instantiate() or implicitly on the first replay().
+        """
+        clear_kernel_annotations()
+        graph = torch.cuda.CUDAGraph(keep_graph=True)
+        x = torch.randn(8, device="cuda")
+
+        # Must not raise: previously __exit__ called raw_cuda_graph_exec() before
+        # instantiation, which errors when keep_graph=True.
+        with torch.cuda.graph(graph, enable_annotations=True):
+            with mark_kernels("kg"):
+                _ = x + 1
+
+        # Annotations are recorded but still keyed by the capture id until the
+        # exec graph exists.
+        self.assertGreater(len(get_kernel_annotations()), 0)
+
+        if trigger == "instantiate":
+            graph.instantiate()
+        else:
+            graph.replay()
+
+        self._assert_keyed_to(self._exec_graph_id(graph))
+
+    def test_keep_graph_true_reinstantiate_rekeys_annotations(self):
+        """keep_graph=True is meant for modifying the template and instantiating
+        again. Each instantiate() produces a fresh exec id, so annotations must
+        be rekeyed from the previous exec id to the new one on re-instantiation,
+        while a plain replay() (no new exec graph) leaves them unchanged.
+        """
+        clear_kernel_annotations()
+        graph = torch.cuda.CUDAGraph(keep_graph=True)
+        x = torch.randn(8, device="cuda")
+
+        with torch.cuda.graph(graph, enable_annotations=True):
+            with mark_kernels("kg"):
+                _ = x + 1
+
+        graph.instantiate()
+        exec1 = self._exec_graph_id(graph)
+        self._assert_keyed_to(exec1)
+
+        # Replay does not create a new exec graph: keys must stay on exec1.
+        graph.replay()
+        self.assertEqual(self._exec_graph_id(graph), exec1)
+        self._assert_keyed_to(exec1)
+
+        # Re-instantiate: a new exec id, annotations must follow it.
+        graph.instantiate()
+        exec2 = self._exec_graph_id(graph)
+        self.assertNotEqual(exec1, exec2)
+        self._assert_keyed_to(exec2)
+
     def test_mark_kernels_skips_preexisting_dependents_on_entry_frontier(self):
         graph = torch.cuda.CUDAGraph()
         x = torch.randn(8, device="cuda")
@@ -601,6 +664,40 @@ class TestGetGraphData(TestCase):
         for kn in kernel_nodes:
             self.assertIsNotNone(kn["kernel_name"])
             self.assertIsInstance(kn["kernel_name"], str)
+
+    def test_export_graph_data_hook(self):
+        import os
+        import pickle
+        import tempfile
+
+        x = torch.zeros([2000], device="cuda")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # keep_graph=True: instantiate() explicitly fires the hook; the
+            # template persists so we can also compare against get_graph_data().
+            g = torch.cuda.CUDAGraph(keep_graph=True)
+            with torch.cuda.graph(g, capture_error_mode="relaxed"):
+                _ = (x + 1).relu()
+            kept_path = os.path.join(tmpdir, "kept.pkl")
+            g.register_post_instantiate_hook(torch.cuda.export_graph_data(kept_path))
+            g.instantiate()
+            self.assertGreater(os.path.getsize(kept_path), 0)
+            with open(kept_path, "rb") as f:
+                self.assertEqual(pickle.load(f), g.get_graph_data())
+
+            # keep_graph=False: capture_end instantiates (firing the hook) before
+            # it destroys the template, so get_graph_data still sees both the
+            # template and the exec graph. Register before capture.
+            g2 = torch.cuda.CUDAGraph()
+            free_path = os.path.join(tmpdir, "free.pkl")
+            g2.register_post_instantiate_hook(torch.cuda.export_graph_data(free_path))
+            with torch.cuda.graph(g2, capture_error_mode="relaxed"):
+                _ = (x + 1).relu()
+            self.assertGreater(os.path.getsize(free_path), 0)
+            with open(free_path, "rb") as f:
+                data = pickle.load(f)
+            self.assertIn("exec_graph_id", data)
+            self.assertGreater(len(data["nodes"]), 0)
 
     def test_edges(self):
         g = torch.cuda.CUDAGraph(keep_graph=True)
