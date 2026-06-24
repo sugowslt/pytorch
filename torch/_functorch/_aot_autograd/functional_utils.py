@@ -214,6 +214,14 @@ def was_inductor_storage_resized(t: object) -> bool:
         return torch._functionalize_was_inductor_storage_resized(t.elem)
 
 
+def was_shallow_copy_data(t: object) -> bool:
+    if not isinstance(t, torch.Tensor):
+        return False
+    if not isinstance(t, FunctionalTensor):
+        return False
+    return torch._functionalize_was_shallow_copy_data(t.elem)  # type: ignore[attr-defined]
+
+
 # f_arg here is either
 # (1) A FunctionalTensor(_to_functional_tensor(FakeTensor))
 # (2) A traceable tensor subclass that holds a FunctionalTensor

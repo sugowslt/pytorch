@@ -3471,13 +3471,9 @@ class SetAttrBuiltinVariable(BaseBuiltinVariable):
                             from torch._subclasses.fake_impls import fast_detach
 
                             snapshot = fast_detach(ev.fake_mode, ev)
-                            if not any(
-                                n is input_node
-                                for n, _ in tx.output._shallow_copy_placeholder_snapshots
-                            ):
-                                tx.output._shallow_copy_placeholder_snapshots.append(
-                                    (input_node, snapshot)
-                                )
+                            tx.output._shallow_copy_placeholder_snapshots.setdefault(
+                                input_node, snapshot
+                            )
 
                     with dynamo_disable_grad(tx), torch.no_grad():
                         out = wrap_fx_proxy(

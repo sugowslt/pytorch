@@ -109,5 +109,10 @@ class FakeTensorProp(torch.fx.Interpreter):
         return self.propagate_dont_convert_inputs(*fake_args)
 
     def propagate_dont_convert_inputs(self, *args: object) -> Any:
+        saved_devices = [(a, a.fake_device) for a in args if isinstance(a, FakeTensor)]
         with self._mode:
-            return super().run(*args)
+            try:
+                return super().run(*args)
+            finally:
+                for fake, device in saved_devices:
+                    fake.fake_device = device

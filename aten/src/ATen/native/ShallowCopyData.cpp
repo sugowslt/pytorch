@@ -44,6 +44,7 @@ static at::Tensor& shallow_copy_data_functionalize(
   TORCH_CHECK(
       !self_impl->was_inductor_storage_resized(),
       "storage_resize_() followed by shallow_copy_data_() is not supported");
+  self_impl->mark_shallow_copy_data();
   self_impl->set__impl(src_impl);
   return self;
 }

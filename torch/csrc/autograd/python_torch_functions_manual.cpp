@@ -671,6 +671,13 @@ void initTorchFunctions(PyObject* module) {
         return impl->was_inductor_storage_resized();
       });
   py_module.def(
+      "_functionalize_was_shallow_copy_data", [](const at::Tensor& t) {
+        TORCH_INTERNAL_ASSERT(
+            at::functionalization::impl::isFunctionalTensor(t));
+        auto impl = at::functionalization::impl::unsafeGetFunctionalWrapper(t);
+        return impl->was_shallow_copy_data();
+      });
+  py_module.def(
       "_functionalize_inductor_storage_resized_counter",
       [](const at::Tensor& t) {
         TORCH_INTERNAL_ASSERT(
