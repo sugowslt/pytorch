@@ -1519,6 +1519,53 @@ class TestFxGraphCache(TestCase):
 
     @config.patch({"fx_graph_cache": True})
     @config.patch({"fx_graph_remote_cache": False})
+    def test_cache_hit_replays_custom_guard_evaluator(self):
+        class CacheEntry:
+            guards_expr = "exact_guard_expr"
+            guards_expr_with_source = [object()]
+            guards_expr_with_source_arg_count = 0
+            extern_libs_key = None
+
+        shape_env = ShapeEnv()
+        fake_mode = FakeTensorMode(shape_env=shape_env)
+        guard_evaluations = []
+
+        def exact_guard_match(guard_expr, _hints):
+            guard_evaluations.append(guard_expr)
+            return guard_expr == CacheEntry.guards_expr
+
+        with (
+            torch._guards.tracing(torch._guards.TracingContext(fake_mode)),
+            mock.patch.object(
+                FxGraphCache,
+                "find_guarded_entry",
+                return_value=(
+                    CacheEntry(),
+                    b"",
+                    {"cache_status_detailed": "hit"},
+                ),
+            ),
+            mock.patch.object(
+                FxGraphCache,
+                "cache_hit_post_compile",
+                side_effect=lambda graph, cache_info, _constants: (graph, cache_info),
+            ),
+        ):
+            graph, cache_info = FxGraphCache._lookup_graph(
+                "key",
+                [],
+                local=True,
+                remote_cache=None,
+                constants=mock.Mock(),
+                evaluate_guards=exact_guard_match,
+            )
+
+        self.assertIsInstance(graph, CacheEntry)
+        self.assertEqual(cache_info["cache_status_detailed"], "hit")
+        self.assertEqual(guard_evaluations, [CacheEntry.guards_expr])
+
+    @config.patch({"fx_graph_cache": True})
+    @config.patch({"fx_graph_remote_cache": False})
     @parametrize("device", (GPU_TYPE, "cpu"))
     @parametrize("dtype", (torch.float32, torch.bfloat16))
     def test_cache_load_with_guards_static_bounds(self, device, dtype):
