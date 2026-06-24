@@ -174,7 +174,7 @@ from .variables.builder import (
 from .variables.ctx_manager import ContextWrappingVariable
 from .variables.functions import ClosureConversionError, VariableTracker
 from .variables.lists import BaseListVariable
-from .variables.misc import NullVariable
+from .variables.misc import CellVariable, NullVariable
 from .variables.nn_module import NNModuleVariable
 from .variables.tensor import (
     NumpyNdarrayVariable,
@@ -1827,6 +1827,7 @@ class OutputGraph(OutputGraphCommon):
         queue = [
             *tx.stack,
             *tx.symbolic_locals.values(),
+            *tx.symbolic_cellvars.values(),
             *self.side_effects.store_attr_mutations.keys(),
         ]
 
@@ -1964,8 +1965,6 @@ class OutputGraph(OutputGraphCommon):
 
         meta.num_stack = len(stack_values)
 
-        cell_and_freevars = set(tx.cellvars() + tx.freevars())
-
         # NB: Typically (i.e., for graph compile from RETURN_VALUE),
         # symbolic_locals will be empty at this point, as prune_dead_locals
         # will clear out all of symbolic_locals because RETURN_VALUE is the
@@ -1990,8 +1989,11 @@ class OutputGraph(OutputGraphCommon):
                 and tx is self.root_tx
             ):
                 continue
-            # Do not load cell/free vars
-            if k in cell_and_freevars:
+            # Do not load cell/free vars (handled by codegen_cells). Match on
+            # CellVariable rather than name: a colliding fast local that shares
+            # a cell's name (its cell lives in symbolic_cellvars) must still be
+            # saved as a normal local here.
+            if type.__instancecheck__(CellVariable, v):
                 continue
             # Do not load variable if it is NULL.
             if sys.version_info >= (3, 12):
