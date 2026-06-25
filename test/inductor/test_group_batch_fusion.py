@@ -1593,10 +1593,10 @@ class TestCatLinearFusion(TestCase):
         # the counter bumped (the counter increments inside fuse, before DCE).
         from unittest import mock
 
+        from torch._inductor.fx_passes import group_batch_fusion as gbf
         from torch._inductor.fx_passes.group_batch_fusion import (
             group_batch_fusion_passes,
         )
-        from torch._inductor.fx_passes import group_batch_fusion as gbf
 
         captured = {}
 
@@ -1694,9 +1694,7 @@ class TestCatLinearFusion(TestCase):
         m = CatLinearMod([16, 16], 32)
         parts = [torch.randn(4, 16), torch.randn(4, 16)]
         self.assertEqual(
-            self._fires(
-                m, parts, traffic_floor=gbf.CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES
-            ),
+            self._fires(m, parts, traffic_floor=gbf.CAT_LINEAR_CAT_TRAFFIC_FLOOR_BYTES),
             0,
         )
 

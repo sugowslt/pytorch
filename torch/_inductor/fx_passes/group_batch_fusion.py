@@ -944,11 +944,11 @@ class CatLinearFusion(BatchFusion):
                                 kwargs={"memory_format": torch.contiguous_format},
                             )
                         if weight_val is not None:
-                            sv = aten.slice.Tensor(
+                            sv = aten.slice.Tensor(  # type: ignore[operator]
                                 weight_val, 1, offsets[i], offsets[i + 1]
                             )
                             w_slice.meta["example_value"] = sv
-                            w_cont.meta["example_value"] = sv.contiguous()
+                            w_cont.meta["example_value"] = sv.contiguous()  # type: ignore[operator]
                         cache[key] = w_cont
                     # bias rides on the first piece only; folding it into the
                     # reduce-add would just be an extra node.
