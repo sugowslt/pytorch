@@ -3718,6 +3718,44 @@ exit(2)
             torch.cuda.empty_cache()
 
     @unittest.skipIf(
+        not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCM >= 5.3 required for graphs"
+    )
+    @unittest.skipIf(
+        TEST_CUDAMALLOCASYNC,
+        "CUDAGraph MemPool retention is specific to the native allocator",
+    )
+    def test_graph_mem_pool_arg_and_nested_use_mem_pool(self):
+        torch.cuda.empty_cache()
+
+        g_default_pool = torch.cuda.MemPool()
+        g_side_pool = torch.cuda.MemPool()
+
+        x = torch.ones((4,), device="cuda")
+        g = torch.cuda.CUDAGraph()
+        stream = torch.cuda.Stream()
+
+        with torch.cuda.graph(g, stream=stream, pool=g_default_pool):
+            y = x + 1
+            with torch.cuda.use_mem_pool(g_side_pool):
+                tmp = y + 2
+                tmp = tmp + 1
+            z = tmp + 3
+        torch.cuda.current_stream().wait_stream(stream)
+
+        self.assertEqual(g.pool(), g_default_pool.id)
+        self.assertEqual(set(g.pools()), {g_default_pool.id, g_side_pool.id})
+        self.assertEqual(g_default_pool.use_count(), 2)
+        self.assertEqual(g_side_pool.use_count(), 2)
+
+        del g_side_pool
+        gc.collect()
+        g.replay()
+        self.assertEqual(z, torch.full_like(z, 8))
+
+        g.reset()
+        self.assertEqual(g_default_pool.use_count(), 1)
+
+    @unittest.skipIf(
         (not TEST_CUDA_GRAPH) or TEST_CUDAMALLOCASYNC,
         "CUDA >= 11.0 or ROCM >= 5.3 required for graphs",
     )
@@ -5979,9 +6017,28 @@ class TestCudaAllocator(TestCase):
             )
 
     def test_allocator_backend(self):
+        def subprocess_env():
+            if IS_WINDOWS:
+                # An empty env breaks Windows stdlib/CUDA extension loading (no PATH).
+                return {
+                    k: os.environ[k]
+                    for k in (
+                        "SYSTEMROOT",
+                        "SYSTEMDRIVE",
+                        "WINDIR",
+                        "COMSPEC",
+                        "PATH",
+                    )
+                    if k in os.environ
+                }
+            return {}
+
         def check_output(script: str) -> str:
+            kwargs = {"env": subprocess_env(), "text": True}
+            if IS_WINDOWS:
+                kwargs["cwd"] = tempfile.gettempdir()
             return subprocess.check_output(
-                [sys.executable, "-c", script], env={}, text=True
+                [sys.executable, "-c", script], **kwargs
             ).strip()
 
         test_script = """\
@@ -8007,12 +8064,9 @@ class TestMemPool(TestCase):
             num_expandable_segments, 1, "Expected to have 1 expandable segment only"
         )
 
-    @unittest.skipIf(
-        IS_LINUX or TEST_WITH_ROCM or TEST_WITH_SLOW,
-        "https://github.com/pytorch/pytorch/issues/153460",
-    )
     @serialTest()
     def test_mempool_ctx_multithread(self):
+        torch._C._cuda_clearCublasWorkspaces()
         torch.cuda.empty_cache()
         segments = torch.cuda.memory._snapshot()["segments"]
         self.assertEqual(len(segments), 0, "Expected empty pool in the beginning")
