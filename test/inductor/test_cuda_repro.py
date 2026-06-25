@@ -31,11 +31,13 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.testing import FileCheck
 from torch.testing._internal.common_cuda import (
     PLATFORM_SUPPORTS_FLASH_ATTENTION,
+    PLATFORM_SUPPORTS_FP8,
     PLATFORM_SUPPORTS_MEM_EFF_ATTENTION,
     SM80OrLater,
     SM90OrLater,
     TEST_MULTIGPU,
 )
+from torch.testing._internal.common_device_type import e4m3_type
 from torch.testing._internal.common_utils import (
     DeterministicGuard,
     freeze_rng_state,
@@ -2285,6 +2287,73 @@ class CudaReproTests(TestCase):
         persistent_code = code.split("@triton_heuristics.persistent_reduction", 1)[1]
         self.assertIn("reduction_hint=ReductionHint.INNER", persistent_code)
         self.assertNotIn("for roffset", persistent_code)
+
+    @parametrize("use_block_ptr", [False, True])
+    @config.patch(
+        {
+            "triton.multi_kernel": 0,
+            "triton.tile_reductions": True,
+            "triton.prefer_nd_tiling": False,
+            "triton.max_tiles": 3,
+            "split_reductions": False,
+        }
+    )
+    def test_persistent_reduction_cse_reindexed_epilogue(self, use_block_ptr):
+        if device_type != "cuda":
+            raise unittest.SkipTest("requires CUDA")
+
+        out_dtype = e4m3_type if PLATFORM_SUPPORTS_FP8 else torch.bfloat16
+        fp8_min = -448.0
+        fp8_max = 448.0
+        min_fp8_scale = 1.0 / (fp8_max * 512.0)
+
+        def fn(out, x, scales_out, scale_ub):
+            hidden = x.shape[1] // 2
+            group_size = 128
+            gate = x[:, :hidden].to(torch.float32)
+            up = x[:, hidden:].to(torch.float32)
+            prod = F.silu(gate) * up
+            grouped = prod.view(x.shape[0], hidden // group_size, group_size)
+            scales = torch.amax(torch.abs(grouped), dim=-1)
+            scales = torch.clamp(scales, max=scale_ub)
+            scales = torch.clamp(scales * (1.0 / fp8_max), min=min_fp8_scale)
+            y = torch.clamp(grouped / scales[:, :, None], fp8_min, fp8_max).to(
+                out.dtype
+            )
+            scales_out.copy_(scales)
+            out.copy_(y.view_as(out))
+
+        x = torch.randn(4, 512, device=device_type, dtype=torch.bfloat16)
+        out = torch.empty(4, 256, device=device_type, dtype=out_dtype)
+        scales_out = torch.empty(4, 2, device=device_type)
+        expected_out = torch.empty_like(out)
+        expected_scales = torch.empty_like(scales_out)
+        scale_ub = torch.tensor(1e6, device=device_type)
+
+        fn(expected_out, x, expected_scales, scale_ub)
+        with config.patch("triton.use_block_ptr", use_block_ptr):
+            _, code = run_and_get_code(
+                torch.compile(fn, fullgraph=True),
+                out,
+                x,
+                scales_out,
+                scale_ub,
+            )
+        self.assertEqual(expected_out, out)
+        self.assertEqual(expected_scales, scales_out)
+
+        code = "\n".join(code)
+        self.assertIn("@triton_heuristics.persistent_reduction", code)
+        self.assertEqual(1, code.count("@triton_heuristics.persistent_reduction"))
+        persistent_code = code.split("@triton_heuristics.persistent_reduction", 1)[1]
+        if use_block_ptr:
+            self.assertIn("tl.make_block_ptr(in_ptr0", persistent_code)
+            self.assertEqual(
+                2, persistent_code.count("tl.load(tl.make_block_ptr(in_ptr0")
+            )
+        else:
+            self.assertEqual(2, persistent_code.count("tl.load(in_ptr0 +"))
+        self.assertLessEqual(persistent_code.count("libdevice.exp"), 1)
 
     def test_scaled_dot_product_efficient_attention_backward(self):
         from torch import nn, Tensor

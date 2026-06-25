@@ -431,6 +431,10 @@ class BlockDescriptorOptions:
 
     params: BlockParameters
     constant_offset: sympy.Expr
+    # Finalized index from prepare_indexing(); load cache-policy analysis uses
+    # this instead of the raw load() index so equivalent loads get matching
+    # emitted options.
+    index: sympy.Expr
     order: list[int]
     mask_vars: OrderedSet[str]
     broadcast_shape: Sequence[sympy.Expr]
@@ -467,6 +471,7 @@ class BlockDescriptorOptions:
         *,
         params: BlockParameters,
         constant_offset: sympy.Expr,
+        index: sympy.Expr,
         range_trees: list[IterationRangesRoot],
         mask_vars: OrderedSet[str],
         get_max_block: Callable[[str], int],
@@ -562,6 +567,7 @@ class BlockDescriptorOptions:
         result = cls(
             params=params,
             constant_offset=V.graph.sizevars.lookup_precomputed_size(constant_offset),
+            index=index,
             order=order,
             mask_vars=mask_vars,
             final_shape=final_shape,
@@ -3732,6 +3738,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 options = options_class.create(
                     params=block_params,
                     constant_offset=offset,
+                    index=index,
                     range_trees=range_trees,
                     mask_vars=mask_vars,
                     get_max_block=self.max_block,
@@ -4264,10 +4271,11 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         #   3.2) Its not its last load
         #   3.3) This load will not be lifted to the body
         #
+        load_analysis_index = indexing.index
         is_coalesced = any(
-            i == 1 for i in self.get_strides_of_load(original_index).values()
+            i == 1 for i in self.get_strides_of_load(load_analysis_index).values()
         )
-        if self.is_broadcasted(original_index):
+        if self.is_broadcasted(load_analysis_index):
             ep = ", eviction_policy='evict_last'"
         elif not is_coalesced:
             ep = ", eviction_policy='evict_last'"
@@ -4312,7 +4320,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         """Skip L1 cache if we're (pretty?) sure the data is used only once
         """
         skip_l1_cache = (
-            not self.is_broadcasted(original_index)
+            not self.is_broadcasted(load_analysis_index)
             and not self.inside_reduction
             and not has_read_deps
             and is_coalesced  # for indirect loads is_coalesced is False?
