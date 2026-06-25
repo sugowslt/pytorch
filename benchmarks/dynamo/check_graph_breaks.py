@@ -65,13 +65,20 @@ def check_graph_breaks(
             }
         )
 
+    scoped_flaky_models = set(flaky_models)
+    if expected_filename.endswith("inductor_timm_training.csv"):
+        # Accuracy can fail before Dynamo runs, which makes graph-break counts
+        # noisy for this CUDA AMP TIMM training case.
+        # https://github.com/pytorch/pytorch/pull/186003#issuecomment-4607459927
+        scoped_flaky_models.add("mobilenetv2_100")
+
     for model in actual_csv["name"]:
         num_graphs = get_field(actual_csv, model, "unique_graphs")
         dynamo_called = num_graphs is not None and int(num_graphs) != 0
 
         graph_breaks = get_field(actual_csv, model, "graph_breaks")
         expected_graph_breaks = get_field(expected_csv, model, "graph_breaks")
-        flaky = model in flaky_models
+        flaky = model in scoped_flaky_models
 
         if expected_graph_breaks is None:
             status = "MISSING:"
