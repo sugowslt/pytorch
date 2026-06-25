@@ -2,6 +2,7 @@ import triton
 import triton.language as tl
 
 import torch
+from torch._native.instrumentation import instrument_triton_launch
 
 
 @triton.jit
@@ -65,6 +66,11 @@ def _pick_block_sizes(m: int, n: int) -> tuple[int, int]:
     return block_m, min(triton.next_power_of_2(n), 128)
 
 
+def _bmm_log_key(a: torch.Tensor, b: torch.Tensor) -> str:
+    return f"bmm_outer B={a.shape[0]} M={a.shape[1]} N={b.shape[2]} {a.dtype}"
+
+
+@instrument_triton_launch("aten::bmm", key_fn=_bmm_log_key)
 def bmm_outer_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     B, M, _ = a.shape
     N = b.shape[2]

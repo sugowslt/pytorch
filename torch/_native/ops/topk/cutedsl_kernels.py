@@ -45,6 +45,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import dsl_user_op, T
 
 import torch
+from torch._native.instrumentation import instrument_cutedsl_compile
 from torch._vendor.quack.cache import jit_cache
 
 
@@ -625,6 +626,10 @@ def _make_fake_tensor(dtype, shape, divisibility=1):
     )
 
 
+@instrument_cutedsl_compile(
+    "aten::topk",
+    key_fn=lambda N, K, deterministic: f"radix N={N} K={K} det={deterministic}",
+)
 @jit_cache
 def _compile_topk_radix(N: int, K: int, deterministic: bool):
     batch_sym = cute.sym_int()
@@ -839,6 +844,7 @@ class _RegisterTopK:
                 mIndices[row, i] = idx
 
 
+@instrument_cutedsl_compile("aten::topk", key_fn=lambda N, K: f"register N={N} K={K}")
 @jit_cache
 def _compile_topk_register(N: int, K: int):
     batch_sym = cute.sym_int()
