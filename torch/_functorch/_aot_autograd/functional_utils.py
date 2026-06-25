@@ -215,6 +215,8 @@ def was_inductor_storage_resized(t: object) -> bool:
 
 
 def was_shallow_copy_data(t: object) -> bool:
+    if is_traceable_wrapper_subclass(t):
+        return False
     if not isinstance(t, torch.Tensor):
         return False
     if not isinstance(t, FunctionalTensor):
