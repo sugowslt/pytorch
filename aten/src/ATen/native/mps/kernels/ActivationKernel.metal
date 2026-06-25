@@ -336,6 +336,38 @@ REGISTER_BINARY_OP(glu, float, float);
 REGISTER_BINARY_OP(glu, half, half);
 REGISTER_BINARY_OP(glu, bfloat, bfloat);
 
+// Dense fast path for a contiguous source: the tensor is collapsed around the
+// split dim into [outer, 2L] (L = halved-dim * inner dims), so each outer row
+// is a contiguous run whose two halves sit L elements apart. Dispatched as a 2D
+// grid (x = position in the run, y = outer row), avoiding all per-element index
+// math.
+template <typename T>
+kernel void glu_dense(
+    device T* out [[buffer(0)]],
+    constant T* input [[buffer(1)]],
+    constant long& inner_half [[buffer(2)]],
+    uint2 tpig [[thread_position_in_grid]]) {
+  const long L = inner_half;
+  const long s = static_cast<long>(tpig.y) * 2 * L + tpig.x;
+  using op_T = opmath_t<T>;
+  const op_T a = input[s];
+  const op_T b = input[s + L];
+  const op_T one = 1;
+  out[static_cast<long>(tpig.y) * L + tpig.x] =
+      static_cast<T>(a / (one + ::metal::precise::exp(-b)));
+}
+
+#define REGISTER_GLU_DENSE_OP(DTYPE)                                        \
+  template [[host_name("glu_dense_" #DTYPE)]] kernel void glu_dense<DTYPE>( \
+      device DTYPE * out [[buffer(0)]],                                     \
+      constant DTYPE * input [[buffer(1)]],                                 \
+      constant long& inner_half [[buffer(2)]],                              \
+      uint2 tpig [[thread_position_in_grid]])
+
+REGISTER_GLU_DENSE_OP(float);
+REGISTER_GLU_DENSE_OP(half);
+REGISTER_GLU_DENSE_OP(bfloat);
+
 // Fused glu backward, mirroring the CUDA kernel: a single pass over the
 // halved iteration shape that reads both input halves (the second via a fixed
 // byte offset) and writes both grad halves, computing sigmoid internally.
@@ -387,6 +419,42 @@ kernel void glu_backward(
 REGISTER_GLU_BACKWARD_OP(float);
 REGISTER_GLU_BACKWARD_OP(half);
 REGISTER_GLU_BACKWARD_OP(bfloat);
+
+// Dense backward fast path, mirroring glu_dense: contiguous input/grad_input
+// collapsed to [outer, 2L], grad_output to [outer, L]. 2D grid (x = run pos,
+// y = outer row).
+template <typename T>
+kernel void glu_backward_dense(
+    device T* grad_input [[buffer(0)]],
+    constant T* input [[buffer(1)]],
+    constant T* grad_output [[buffer(2)]],
+    constant long& inner_half [[buffer(3)]],
+    uint2 tpig [[thread_position_in_grid]]) {
+  const long L = inner_half;
+  const long s = static_cast<long>(tpig.y) * 2 * L + tpig.x;
+  const long g = static_cast<long>(tpig.y) * L + tpig.x;
+  using op_T = opmath_t<T>;
+  const op_T a = input[s];
+  const op_T b = input[s + L];
+  const op_T gO = grad_output[g];
+  const op_T one = 1;
+  const op_T sig = one / (one + ::metal::precise::exp(-b));
+  grad_input[s] = static_cast<T>(sig * gO);
+  grad_input[s + L] = static_cast<T>((one - sig) * sig * gO * a);
+}
+
+#define REGISTER_GLU_BACKWARD_DENSE_OP(DTYPE)                      \
+  template [[host_name("glu_backward_dense_" #DTYPE)]] kernel void \
+  glu_backward_dense<DTYPE>(                                       \
+      device DTYPE * grad_input [[buffer(0)]],                     \
+      constant DTYPE * input [[buffer(1)]],                        \
+      constant DTYPE * grad_output [[buffer(2)]],                  \
+      constant long& inner_half [[buffer(3)]],                     \
+      uint2 tpig [[thread_position_in_grid]])
+
+REGISTER_GLU_BACKWARD_DENSE_OP(float);
+REGISTER_GLU_BACKWARD_DENSE_OP(half);
+REGISTER_GLU_BACKWARD_DENSE_OP(bfloat);
 
 struct log_sigmoid_forward_functor {
   template <typename T>
