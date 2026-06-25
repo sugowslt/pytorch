@@ -1402,6 +1402,17 @@
       ]
     }
   ],
+  "GB9985": [
+    {
+      "Gb_type": "can't inline non-Python function",
+      "Context": "{fn}",
+      "Explanation": "Dynamo can only inline regular Python functions.",
+      "Hints": [
+        "Move usage of this function out of `torch.compile` region",
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0098": [
     {
       "Gb_type": "Skip calling `torch.compiler.disable()`d function",

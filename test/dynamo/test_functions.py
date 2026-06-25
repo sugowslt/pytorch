@@ -6157,7 +6157,11 @@ class DefaultsTests(torch._dynamo.test_case.TestCase):
         with self.assertRaises(Unsupported):
             a.call_function(None, [], {})
 
-    def test_unsupported_msg_in_bind_args_error(self):
+    def test_bind_args_error_raises_typeerror(self):
+        # An argument-count mismatch on an inlined call is a CPython call-boundary
+        # TypeError. Dynamo raises it as an observed exception so traced code can
+        # catch it; if it is never caught and escapes a fullgraph region, it
+        # surfaces as Unsupported.
         class BadClass:
             """Class that requires 'cls' argument."""
 
@@ -6169,14 +6173,24 @@ class DefaultsTests(torch._dynamo.test_case.TestCase):
             yield
 
         @torch.compile(backend="eager", fullgraph=True)
-        def fn():
+        def uncaught():
             with my_context():
                 # Error: Missing required positional argument 'cls'
                 obj = BadClass()  # This will raise TypeError
                 return obj
 
-        with self.assertRaisesRegex(Unsupported, "obj = BadClass()"):
-            fn()
+        with self.assertRaisesRegex(Unsupported, "missing required positional"):
+            uncaught()
+
+        @torch.compile(backend="eager", fullgraph=True)
+        def caught(x):
+            try:
+                BadClass()
+            except TypeError:
+                return x + 1
+            return x - 1
+
+        self.assertEqual(caught(torch.zeros(3)), torch.ones(3))
 
     def test_inspect_method_source(self):
         class Mod(torch.nn.Module):

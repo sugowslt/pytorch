@@ -680,7 +680,19 @@ class UserFunctionVariable(BaseUserFunctionVariable):
         fn: types.FunctionType = self.fn
 
         if not isinstance(fn, FunctionType):
-            raise TypeError("Only supports regular Python functions.")
+            # This is a Dynamo-internal limitation (e.g. torch.jit.ScriptFunction),
+            # not an argument-binding error. Graph-break rather than raising a
+            # user-catchable TypeError that callers might wrongly route through
+            # raise_observed_exception.
+            unimplemented(
+                gb_type="can't inline non-Python function",
+                context=f"{fn}",
+                explanation="Dynamo can only inline regular Python functions.",
+                hints=[
+                    "Move usage of this function out of `torch.compile` region",
+                    *graph_break_hints.SUPPORTABLE,
+                ],
+            )
         root_tx = parent.output.root_tx
 
         source = self.get_source()
