@@ -2033,6 +2033,41 @@ class CuTeLayoutTest(TestCase):
 class ProcessGroupOpaqueTypeTest(TestCase):
     """Test that ProcessGroup opaque type members are registered and exist on the class."""
 
+    def test_process_group_subclasses_opaque_base(self):
+        from torch._opaque_base import OpaqueBase
+        from torch.distributed.device_mesh import _register_distributed_opaque_types
+
+        _register_distributed_opaque_types()
+
+        self.assertTrue(issubclass(ProcessGroup, OpaqueBase))
+        self.assertIsInstance(ProcessGroup(0, 1), OpaqueBase)
+        for _ in range(1000):
+            process_group = ProcessGroup(0, 1)
+            self.assertIsInstance(process_group, OpaqueBase)
+            self.assertEqual(
+                ProcessGroup.unbox(process_group.boxed()).rank(),
+                process_group.rank(),
+            )
+
+    def test_process_group_python_subclass_must_initialize_pybind_base(self):
+        class BadProcessGroup(ProcessGroup):
+            def __init__(self):
+                pass
+
+        with self.assertRaisesRegex(TypeError, "must be called"):
+            BadProcessGroup()
+
+    def test_process_group_python_subclass_initializes_pybind_base(self):
+        class GoodProcessGroup(ProcessGroup):
+            def __init__(self):
+                super().__init__(0, 1)
+                self.initialized = True
+
+        process_group = GoodProcessGroup()
+        self.assertTrue(process_group.initialized)
+        self.assertEqual(process_group.rank(), 0)
+        self.assertEqual(process_group.size(), 1)
+
     def test_registered_members_exist_on_process_group(self):
         from torch._library.opaque_object import get_member_type
 
@@ -2062,6 +2097,25 @@ class ProcessGroupOpaqueTypeTest(TestCase):
                 f"member but does not exist on the ProcessGroup class. "
                 f"Was it renamed or removed?",
             )
+
+    def test_fake_process_group_gets_registered_members(self):
+        from torch._library.fake_class_registry import maybe_to_fake_obj
+        from torch._library.opaque_object import get_opaque_obj_info
+        from torch.distributed.device_mesh import _register_distributed_opaque_types
+
+        _register_distributed_opaque_types()
+        opaque_info = get_opaque_obj_info(ProcessGroup)
+        self.assertIsNotNone(opaque_info)
+        original_members = opaque_info.members
+        try:
+            opaque_info.members = {
+                name: original_members[name] for name in ("size", "rank")
+            }
+            fake_pg = maybe_to_fake_obj(FakeTensorMode(), ProcessGroup(0, 1))
+            self.assertEqual(fake_pg.size(), 1)
+            self.assertEqual(fake_pg.rank(), 0)
+        finally:
+            opaque_info.members = original_members
 
 
 if __name__ == "__main__":
