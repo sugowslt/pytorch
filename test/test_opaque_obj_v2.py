@@ -48,6 +48,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx._graph_pickler import GraphPickler, Options
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from torch.fx.graph import _illegal_char_regex
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     IS_LINUX,
@@ -1316,10 +1317,11 @@ def forward(self, x):
 
         # This is done in torch.fx's graph in _namespace.create_name() where it
         # sanitizes the name
+        fx_class = _illegal_char_regex.sub("_", get_opaque_type_name(RNGState))
         self.assertExpectedInline(
             backend.graphs[0].code.strip(),
-            """\
-def forward(self, L_rng_state_ : __main___RNGState, L_x_ : torch.Tensor):
+            f"""\
+def forward(self, L_rng_state_ : {fx_class}, L_x_ : torch.Tensor):
     l_rng_state_ = L_rng_state_
     l_x_ = L_x_
     noisy_inject = torch.ops._TestOpaqueObject.noisy_inject(l_x_, l_rng_state_);  l_x_ = None
@@ -1425,10 +1427,11 @@ def forward(self, arg0_1, arg1_1):
         inp = (NestedCounters([Counter(1, 5), Counter(2, 5)]), torch.ones(2, 3))
         torch.compile(foo, backend=backend, fullgraph=True)(*inp)
 
+        fx_class = _illegal_char_regex.sub("_", get_opaque_type_name(Counter))
         self.assertExpectedInline(
             backend.graphs[0].code.strip(),
-            """\
-def forward(self, L_nested_counter_c_0_ : __main___Counter, L_nested_counter_c_1_ : __main___Counter, L_x_ : torch.Tensor):
+            f"""\
+def forward(self, L_nested_counter_c_0_ : {fx_class}, L_nested_counter_c_1_ : {fx_class}, L_x_ : torch.Tensor):
     l_nested_counter_c_0_ = L_nested_counter_c_0_
     l_nested_counter_c_1_ = L_nested_counter_c_1_
     l_x_ = L_x_
@@ -1457,10 +1460,11 @@ def forward(self, L_nested_counter_c_0_ : __main___Counter, L_nested_counter_c_1
         res = torch.compile(foo, fullgraph=True, backend=backend)(*inp)
         self.assertEqual(res, foo(*inp))
 
+        fx_class = _illegal_char_regex.sub("_", get_opaque_type_name(OpaqueQueue))
         self.assertExpectedInline(
             backend.graphs[0].code.strip(),
-            """\
-def forward(self, L_nested_queue_q : __main___OpaqueQueue, L_x_ : torch.Tensor):
+            f"""\
+def forward(self, L_nested_queue_q : {fx_class}, L_x_ : torch.Tensor):
     l_nested_queue_q = L_nested_queue_q
     l_x_ = L_x_
     tan = l_x_.tan()
@@ -2935,8 +2939,8 @@ class GraphModule(torch.nn.Module):
         fw_graph = backend.graphs[0]
         self.assertExpectedInline(
             fw_graph.code.strip(),
-            """\
-def forward(self, L_scale_obj_ : __main___OpaqueMultiplier, L_x_ : torch.Tensor):
+            f"""\
+def forward(self, L_scale_obj_ : {_illegal_char_regex.sub("_", get_opaque_type_name(OpaqueMultiplier))}, L_x_ : torch.Tensor):
     l_scale_obj_ = L_scale_obj_
     l_x_ = L_x_
     mul_with_scale = torch.ops._TestOpaqueObject.mul_with_scale(l_scale_obj_, l_x_);  l_scale_obj_ = l_x_ = None
@@ -3037,8 +3041,8 @@ def forward(self, primals_1, tangents_1):
         graph_code = captured["graph"].code.strip()
         self.assertExpectedInline(
             graph_code,
-            """\
-def forward(self, G_Color_GREEN : __main___Color, L_x_ : torch.Tensor):
+            f"""\
+def forward(self, G_Color_GREEN : {_illegal_char_regex.sub("_", get_opaque_type_name(Color))}, L_x_ : torch.Tensor):
     g_color_green = G_Color_GREEN
     l_x_ = L_x_
     apply_color_scale = torch.ops._TestOpaqueObject.apply_color_scale(g_color_green, l_x_);  g_color_green = l_x_ = None
