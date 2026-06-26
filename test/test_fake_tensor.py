@@ -112,7 +112,7 @@ skipIfCppFakeTensor = unittest.skipIf(
 if CPP_FAKETENSOR:
     from torch._subclasses.fake_tensor import CppFakeTensorMode
 
-    def FakeTensorMode(  # noqa: F811
+    def FakeTensorMode(
         *,
         shape_env=None,
         allow_fallback_kernels=True,
@@ -785,8 +785,6 @@ class FakeTensorTest(TestCase):
         fake_y = mode.from_tensor(y)
 
         with self.assertRaisesRegex(
-            # C++ FakeTensor raises a plain RuntimeError (c10::Error) with
-            # the same message rather than the Python subclass.
             (FakeTensorDeviceMismatchError, RuntimeError),
             "Expected all tensors to be on the same device",
         ) as exc:
@@ -821,8 +819,6 @@ class FakeTensorTest(TestCase):
             y = torch.randn(10, device="cuda")
 
             with self.assertRaisesRegex(
-                # C++ FakeTensor raises a plain RuntimeError (c10::Error) with
-                # the same message rather than the Python subclass.
                 (FakeTensorDeviceMismatchError, RuntimeError),
                 "Expected all tensors to be on the same device",
             ) as exc:
@@ -2434,8 +2430,7 @@ instantiate_device_type_tests(
 
 
 class FakeTensorConverterTest(TestCase):
-    # Exercises Python FakeTensorConverter memoization (tensor_memo /
-    # storage_memo / from_meta_and_device); the C++ path memoizes differently.
+    # C++ no caching
     @skipIfCppFakeTensor
     def test_memoized_conversion_to_meta(self):
         x = torch.rand(2, 2, 2)

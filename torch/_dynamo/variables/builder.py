@@ -3594,10 +3594,8 @@ def _clone_input(value: Any, fake_mode: FakeTensorMode | None) -> Any:
             )
             or value.is_nested
         ):
-            # NB: ensure strides are preserved. Disable fake mode so the clone
-            # stays real: the C++ fake mode keeps the Fake dispatch key in TLS
-            # for the whole trace, which would otherwise fakeify this clone of a
-            # real tensor (the Python FakeTensorMode is not active here).
+            # NB: ensure strides are preserved.
+            # we need to manually disable C++ faketensormode here
             from torch._subclasses.fake_tensor import unset_fake_temporarily
 
             with unset_fake_temporarily():

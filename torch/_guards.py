@@ -1535,12 +1535,6 @@ def detect_fake_mode(
         get_plain_tensors,
     )
 
-    # When the user opts into the C++ FakeTensorMode (the make_fx / dynamo /
-    # inductor env-var flags), dynamo creates it alongside the Python fake_mode
-    # that backs TracingContext, so check it before the TracingContext shortcut
-    # below.  C++ fake inputs are plain Tensors carrying DispatchKey::Fake (not
-    # the Python FakeTensor subclass), so the heuristics below would not find
-    # them anyway.
     if cpp_fake_tensor_mode_active():
         return CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
 

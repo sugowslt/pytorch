@@ -63,7 +63,6 @@ from ..source import (
     TypeSource,
 )
 from ..utils import (
-    _disable_cpp_fake_tensor_mode,
     check_constant_args,
     check_numpy_ndarray_args,
     check_unspec_or_constant_args,
@@ -262,6 +261,8 @@ _MISSING_SENTINEL = object()
 
 
 def populate_builtin_to_tensor_fn_map() -> None:
+    from torch._subclasses.fake_tensor import unset_fake_temporarily
+
     global BUILTIN_TO_TENSOR_FN_MAP
     if len(BUILTIN_TO_TENSOR_FN_MAP) > 0:
         # Only populate once; after there are elements present no need to
@@ -287,7 +288,7 @@ def populate_builtin_to_tensor_fn_map() -> None:
             most_recent_func = func
             return func(*args, **kwargs)
 
-    with _disable_cpp_fake_tensor_mode():
+    with unset_fake_temporarily():
         inp0 = torch.ones(1)
         inp1 = torch.ones(1)
         inp0_int = torch.ones(1, dtype=torch.int32)

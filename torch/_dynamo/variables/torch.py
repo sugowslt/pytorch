@@ -416,8 +416,6 @@ def _collect_tensors_with_sources(
                 f"Expected fake_tensor to be a torch.Tensor, got {type(fake_tensor)}"
             )
         if is_fake(fake_tensor):
-            # is_fake covers Python FakeTensors and C++ fake tensors (plain
-            # torch.Tensor with the Fake dispatch key).
             pass
         elif is_traceable_wrapper_subclass(fake_tensor):
             # For tensor subclasses (e.g. DTensor), verify the inner tensors

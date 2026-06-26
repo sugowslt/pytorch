@@ -130,9 +130,6 @@ class BaseHOP(HigherOrderOperator, abc.ABC):
     def _fake_impl(self, subgraph, *operands, **kwargs):
         return subgraph(*operands)
 
-    def _call_Fake(self, subgraph, *operands, **kwargs):
-        return subgraph(*operands)
-
     # NOTE [Support input mutation of hops]
     # To support input mutation, hop's subgraph must be functionalized because many inductor passes are
     #   applied to subgraph recursively and only work on functional graph. However, we could inline an

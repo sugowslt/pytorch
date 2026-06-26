@@ -851,6 +851,7 @@ class OutputGraph(OutputGraphCommon):
         self.traced_code = self.tracing_context.traced_code
         self.dynamo_compile_id: CompileId | None = CompileContext.current_compile_id()
 
+        self.cpp_fake_mode: CppFakeTensorMode | None
         if config.use_cpp_fake_tensor:
             self.cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(
                 fake_mode.fake_tensor_converter, shape_env
@@ -2718,8 +2719,6 @@ class OutputGraph(OutputGraphCommon):
                 continue
 
             fake_tensor = var.as_proxy().node.meta.get("example_value")
-            # is_fake (not isinstance FakeTensor) so C++ fake tensors, which are
-            # plain torch.Tensors carrying DispatchKey::Fake, are recognized too.
             if not torch._subclasses.fake_tensor.is_fake(fake_tensor):
                 raise AssertionError(
                     f"expected example_value to be a FakeTensor, got {type(fake_tensor)}"

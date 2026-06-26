@@ -363,14 +363,6 @@ class CppFakeTensorMode:
     def _get_active_cpp_fake_tensor_mode(cls) -> CppFakeTensorMode | None:
         return torch._C._get_active_cpp_fake_tensor_mode()
 
-    # `with self:` activates the Fake dispatch key for the duration of the block,
-    # mirroring `with python_fake_mode:`. This matters for callers like MetaProxy
-    # (torch/fx/proxy.py) that run an op under `with fake_mode:` to fake-propagate
-    # it: factory sub-ops (e.g. empty_strided) have no fake tensor input and only
-    # route to Fake when the key is in the TLS include set. The prior state is
-    # saved/restored (rather than calling the force-on/force-off activate()/
-    # deactivate() directly) so this nests correctly: a no-op for op_impl handlers,
-    # which already run with the key active inside the fallback.
     def __enter__(self) -> CppFakeTensorMode:
         self._activation_stack.append(
             torch._C._dispatch_tls_is_dispatch_key_included(torch._C.DispatchKey.Fake)

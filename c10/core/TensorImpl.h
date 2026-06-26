@@ -263,7 +263,6 @@ struct C10_API FakeTensorMode {
       c10::StorageImpl* constant_storage);
 
   std::shared_ptr<at::Tensor> get_constant(c10::TensorImpl* fake_impl) const;
-  bool has_constant(c10::TensorImpl* fake_impl) const;
   void invalidate_constant_aliases(c10::StorageImpl* storage_impl);
 
   // key = faketensor, value = real constant

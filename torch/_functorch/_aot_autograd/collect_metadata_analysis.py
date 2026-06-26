@@ -247,8 +247,8 @@ def run_functionalized_fw_and_collect_metadata(
 
             # We didn't do any tracing, so we don't need to process the
             # unbacked symbols, they will just disappear into the ether.
-            # Also, prevent memoization from applying. Only the Python
-            # FakeTensorMode memoizes; the C++ mode has nothing to invalidate.
+            # Also, prevent memoization from applying.
+            # only do this for Python FakeTensorMode
             if isinstance(fake_mode, FakeTensorMode):
                 fake_mode.epoch += 1
                 fake_mode.reset_nt_tensor_id_counter()

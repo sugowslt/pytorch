@@ -1408,11 +1408,6 @@ class _InProcessFxCompile(FxCompile):
                     fake_mode = fake_tensor_prop(gm, example_inputs)
 
             if config.use_cpp_fake_tensor:
-                # Reuse the cpp mode registered by an earlier phase if present
-                # (it shares fake_mode's shape_env/converter); only create one
-                # if none exists. Either way activate it for the lowering: the
-                # mode is deactivated between phases, so we must turn on the Fake
-                # dispatch key here or symbolic ops dispatch to real kernels.
                 cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
                 if cpp_fake_mode is None:
                     cpp_fake_mode = CppFakeTensorMode.create_cpp_fake_tensor_mode(

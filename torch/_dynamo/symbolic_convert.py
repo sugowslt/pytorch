@@ -209,7 +209,7 @@ from .variables.user_defined import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch._subclasses.fake_tensor import CppFakeTensorMode, FakeTensorMode
 
     from .package import CompilePackage
 
@@ -4988,7 +4988,7 @@ class InstructionTranslatorBase(
         return self.output.tracing_context.fake_mode
 
     @property
-    def cpp_fake_mode(self) -> object:
+    def cpp_fake_mode(self) -> CppFakeTensorMode | None:
         return self.output.cpp_fake_mode
 
     @contextlib.contextmanager
@@ -6151,7 +6151,7 @@ class InliningInstructionTranslator(InstructionTranslatorBase):
         return self.parent.fake_mode
 
     @property
-    def cpp_fake_mode(self) -> object:
+    def cpp_fake_mode(self) -> CppFakeTensorMode | None:
         return self.parent.cpp_fake_mode
 
     def run_ctx_mgr(self) -> Any:

@@ -5279,12 +5279,7 @@ class AlgorithmSelectorCache(PersistentCache):
     ) -> dict[ChoiceCaller, float]:
         from torch._subclasses.fake_tensor import unset_fake_temporarily
 
-        # Autotuning benchmarks real kernels on real tensors. Under the C++
-        # FakeTensorMode the Fake key is active throughout codegen, which would
-        # otherwise make the benchmark input/output factory tensors (rand_strided,
-        # torch.randn storage resizes, etc.) fake and crash the real kernel. Unset
-        # it for the whole benchmark. (Python needs no equivalent: no fake mode is
-        # active during its codegen; the subprocess path is naturally real.)
+        # need to manually deactivate C++ FakeTensorMode here
         with unset_fake_temporarily():
             inputs = cls.get_inputs(
                 choices, input_nodes, layout, input_gen_fns, hint_override=hint_override

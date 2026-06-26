@@ -2861,13 +2861,7 @@ class _AutogradBackwardCompiler:
         saved_context = self.lazy_backward_info.saved_context
         saved_compile_context = self.lazy_backward_info.saved_compile_context
 
-        # The backward is lowered lazily from the autograd engine, outside (and
-        # often on a different thread from) the dynamo/AOT phase that registered
-        # the C++ FakeTensorMode, so none is active here. Re-establish it from the
-        # saved tracing context's fake mode (sharing its converter/shape_env) and
-        # activate it around the compile, mirroring the forward joint trace in
-        # aot_dispatch_autograd. Otherwise FakeTensorProp in inductor runs under
-        # the Python fake mode and rejects the backward graph's C++ fake inputs.
+        # recover C++ FakeTensorMode from saved tracing context's fake mode
         cpp_fake_ctx: AbstractContextManager[Any] = nullcontext()
         if dynamo_config.use_cpp_fake_tensor and saved_context is not None:
             fake_mode = saved_context.fake_mode

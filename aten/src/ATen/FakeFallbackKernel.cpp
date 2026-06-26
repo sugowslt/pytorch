@@ -363,7 +363,7 @@ void invalidate_written_to_constants(
       flat_arg_fake_tensors.begin(),
       flat_arg_fake_tensors.end(),
       [&](const at::Tensor& t) {
-        return mode->has_constant(t.unsafeGetTensorImpl());
+        return mode->get_constant(t.unsafeGetTensorImpl()) != nullptr;
       });
   if (!any_constant || !schema.is_mutable())
     return;
@@ -650,7 +650,8 @@ void fakeFallback(
             flat_arg_fake_tensors.begin(),
             flat_arg_fake_tensors.end(),
             [&](const at::Tensor& t) {
-              return mode && mode->has_constant(t.unsafeGetTensorImpl());
+              return mode &&
+                  mode->get_constant(t.unsafeGetTensorImpl()) != nullptr;
             });
 
     // isinstance(func, torch._ops.OpOverload) — always true in C++ fallback

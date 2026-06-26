@@ -2457,14 +2457,6 @@ def selective_decompose(
                 joint_gm, should_decompose, decomposition
             ).run(*args)
 
-    # C++ fake tensors dispatch to the Fake key via a per-tensor key, so ops with
-    # fake tensor inputs are intercepted during this re-trace. Factory ops (e.g.
-    # empty_strided inside a prim/ref meta) have no tensor input and only route to
-    # Fake when the key is in the TLS include set, i.e. when the mode is activated.
-    # Activate it here so those sub-ops are faked instead of hitting the real
-    # backend (mirrors the joint trace in aot_dispatch_autograd's graph capture).
-    # Only force-deactivate on exit if we turned it on, so we don't disturb an
-    # already-active mode (activate/deactivate are force-on/force-off toggles).
     cpp_fake_mode = CppFakeTensorMode._get_active_cpp_fake_tensor_mode()
     activate_cpp_fake = (
         cpp_fake_mode is not None

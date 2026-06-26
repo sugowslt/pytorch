@@ -461,12 +461,6 @@ c10::Device TensorImpl::device_custom() const {
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     return *extra_meta_->fake_device_;
   }
-  if (C10_UNLIKELY(extra_meta_ && extra_meta_->fake_device_.has_value())) {
-    if (c10::impl::tls_is_dispatch_key_excluded(DispatchKey::Fake)) {
-      return device_default();
-    }
-    return *extra_meta_->fake_device_;
-  }
   return device_default();
 }
 
@@ -1141,12 +1135,6 @@ std::shared_ptr<at::Tensor> FakeTensorMode::get_constant(
   if (it == tensor_to_constant_.end())
     return nullptr;
   return it->second;
-}
-
-bool FakeTensorMode::has_constant(c10::TensorImpl* fake_impl) const {
-  std::lock_guard<std::mutex> lock(constant_mutex_);
-  auto it = tensor_to_constant_.find(fake_impl);
-  return it != tensor_to_constant_.end() && it->second != nullptr;
 }
 
 void FakeTensorMode::invalidate_constant_aliases(

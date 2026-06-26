@@ -2788,8 +2788,6 @@ def fallback_node_due_to_unsupported_type(node: torch.fx.Node, allow_cpu_inputs=
             return False
 
         for meta in pytree.tree_leaves(inp_out_node.meta["val"]):
-            # is_fake (not isinstance FakeTensor) so C++ fake tensors, which are
-            # plain torch.Tensor with the Fake key, are also inspected here.
             if not is_fake(meta):
                 continue
 
