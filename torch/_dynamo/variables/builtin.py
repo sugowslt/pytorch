@@ -121,6 +121,8 @@ from .object_protocol import (
     pysequence_check,
     ternary_iop,
     ternary_op,
+    type_implements_mp_length,
+    type_implements_sq_length,
     vt_add,
     vt_getitem,
     vt_identity_compare,
@@ -2217,10 +2219,6 @@ class BuiltinVariable(BaseBuiltinVariable):
         default = args[1] if len(args) == 2 else ConstantVariable.create(0)
 
         obj_type = maybe_get_python_type(obj)
-        from .object_protocol import (
-            type_implements_mp_length,
-            type_implements_sq_length,
-        )
 
         if type_implements_sq_length(obj_type) or type_implements_mp_length(obj_type):
             return generic_len(tx, obj)
