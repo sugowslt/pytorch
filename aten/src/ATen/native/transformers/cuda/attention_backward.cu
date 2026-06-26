@@ -71,11 +71,13 @@ namespace at::native {
 
 namespace {
 
-constexpr int64_t kMemEffAttentionBiasAlignment = 8;
+int64_t mem_eff_attention_backward_bias_alignment(const Tensor& bias) {
+  return bias.element_size() == 4 ? 4 : 8;
+}
 
-bool has_mem_eff_attention_bias_alignment(const Tensor& bias) {
+bool has_mem_eff_attention_bias_alignment(const Tensor& bias, int64_t alignment) {
   for (const auto dim : c10::irange(bias.dim() - 1)) {
-    if (bias.stride(dim) % kMemEffAttentionBiasAlignment != 0) {
+    if (bias.stride(dim) % alignment != 0) {
       return false;
     }
   }
@@ -83,13 +85,13 @@ bool has_mem_eff_attention_bias_alignment(const Tensor& bias) {
 }
 
 Tensor ensure_mem_eff_attention_bias_alignment(const Tensor& bias) {
-  if (bias.dim() != 4 || has_mem_eff_attention_bias_alignment(bias)) {
+  const auto alignment = mem_eff_attention_backward_bias_alignment(bias);
+  if (bias.dim() != 4 || has_mem_eff_attention_bias_alignment(bias, alignment)) {
     return bias;
   }
 
   const auto last_dim_size = bias.size(-1);
-  const auto pad_count = kMemEffAttentionBiasAlignment -
-      (last_dim_size % kMemEffAttentionBiasAlignment);
+  const auto pad_count = alignment - (last_dim_size % alignment);
   return at::pad(bias, {0, pad_count}).slice(-1, 0, last_dim_size);
 }
 
