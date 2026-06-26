@@ -4970,7 +4970,7 @@ class TestQuantizedLinear(TestCase):
             process.exitcode,
             0,
             msg=(
-                lambda msg: "{msg}\nSpawned fast-path validation failed.\n"
+                lambda msg: f"{msg}\nSpawned fast-path validation failed.\n"
                 f"traceback:\n{error}"
             ),
         )
@@ -5152,7 +5152,7 @@ class TestQuantizedLinear(TestCase):
             process.exitcode,
             0,
             msg=(
-                lambda msg: "{msg}\nSpawned fp8 fast-path validation failed.\n"
+                lambda msg: f"{msg}\nSpawned fp8 fast-path validation failed.\n"
                 f"traceback:\n{error}"
             ),
         )

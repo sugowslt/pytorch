@@ -776,7 +776,7 @@ class TestLazyTmaGlobalScratch(InductorTestCase):
         self.assertEqual(
             result.returncode,
             0,
-            lambda msg: "{msg}\nlazy TMA scratch regression subprocess failed:\n"
+            lambda msg: f"{msg}\nlazy TMA scratch regression subprocess failed:\n"
             f"returncode: {result.returncode}\n"
             f"stderr tail:\n{stderr_tail}",
         )
