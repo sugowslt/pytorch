@@ -1954,6 +1954,385 @@ DEFERRED. No `torch/_dynamo` source change attempted. Sentinel
 `CPython313-test_dict-DictTest.test_str_nonstr` left in place. Working tree ends
 with only `coverage.md` modified.
 
+## Gates (Cycle 4)
+
+### Cycle4-E: operator COperatorTestCase C-variants
+
+Status: TRIAGED, NO CHANGE. All 45 `COperatorTestCase` sentinels still FAIL with
+the sentinel removed; zero dead sentinels, so nothing was removed. No source
+change made (no small in-scope object-protocol fix applies). All markers left in
+place.
+
+Scope: `test/dynamo_expected_failures/CPython313-test_operator-COperatorTestCase.*`
+(45 sentinels). There is NO bare `OperatorTestCase` sentinel -- the concrete
+classes are `PyOperatorTestCase` (module = pure-python `py_operator`) and
+`COperatorTestCase` (module = C `c_operator`), both subclassing the abstract
+`OperatorTestCase` mixin (test_operator.py:651/655). This gate is the C-variant
+only.
+
+Root-cause classification: out of scope (CPython C-extension internals). The
+`COperatorTestCase.module` is the C `_operator` extension. Dynamo cannot inline C
+extension functions ("skip reason: cannot determine source file for _operator
+(likely a C extension or builtin)"), so every C-variant test graph-breaks under
+`error_on_graph_break=True`. This is fundamentally different from
+`PyOperatorTestCase`, which forced the pure-python `operator` module and is
+inlinable. The G33/bind_args mechanism is NOT involved here and was neither
+relied on nor reintroduced. Per `CPYTHON_MIRRORING.md` "what not to mirror"
+(CPython implementation details / C-extension internals), making these pass
+would require either admitting the C `_operator` extension into the graph or
+polyfilling every C `operator` function -- both broad and out of scope for a
+focused object-protocol gate.
+
+Per-sentinel result (each: sentinel temporarily moved to `agent_space/`, test
+run under Dynamo, then restored): ALL 45 FAIL. Failure-kind histogram:
+
+- 39 x `Unsupported: Attempted to call function marked as skipped` (the C
+  `_operator.<fn>` call itself): test_abs, test_add, test_bitwise_and,
+  test_bitwise_or, test_bitwise_xor, test_call, test_concat, test_contains,
+  test_countOf, test_delitem, test_eq, test_floordiv, test_ge, test_getitem,
+  test_gt, test_iconcat_without_getitem, test_index, test_indexOf, test_inplace,
+  test_invert, test_is, test_is_not, test_le, test_length_hint, test_lshift,
+  test_lt, test_matmul, test_mod, test_mul, test_ne, test_neg, test_not_,
+  test_pos, test_pow, test_rshift, test_setitem, test_sub, test_truediv,
+  test_truth.
+- 3 x `Unsupported: Unsupported function call` (constructing the C
+  attrgetter/itemgetter/methodcaller objects): test_attrgetter, test_itemgetter,
+  test_methodcaller.
+- 3 x `Unsupported: missing sq_contains` (`inspect.signature` over the C
+  callables): test_attrgetter_signature, test_itemgetter_signature,
+  test_methodcaller_signature.
+
+All 45 are out-of-scope C-extension blockers (not in-scope object-protocol gaps).
+Sentinels LEFT IN PLACE; future candidates only if Dynamo gains general C
+`operator` module support.
+
+Exact commands:
+
+```bash
+# per sentinel (representative), sentinel moved aside first:
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 \
+  python test/cpython/v3_13/test_operator.py COperatorTestCase.test_add
+# -> FAILED (errors=1): Unsupported: Attempted to call function marked as
+#    skipped; module: _operator, qualname: add (C extension, no source file).
+
+# whole file (no sentinels changed) -> baseline, no XPASS leak:
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_operator.py
+# -> Ran 106 tests, OK (skipped=100); no failures, no XPASS.
+```
+
+No sentinels removed, so no removal-confirmation run was required. The whole-file
+run confirms baseline behavior is unchanged. No `torch/_dynamo` source change.
+Working tree ends with only `coverage.md` modified.
+
+### Cycle4-F: test_deque.TestBasic.test_copy
+
+Status: IMPLEMENTED. Classification (a): genuine in-scope object-protocol gaps
+(deque copy semantics + module-level `random.random` RNG modeling). Source fix
+landed in the working tree (uncommitted); target sentinel + 1 collateral
+sentinel removed.
+
+Two blockers, both fixed:
+
+1. `copy.copy(d)` resolves `type(d).__copy__` and calls it with the instance
+   (CPython `copy.py:78-80`). `collections.deque` has a C `__copy__`. Dynamo
+   graph-broke with "does not know how to trace method `__copy__` of class
+   `type`" on `UserDefinedClassVariable(deque).__copy__(d)`. Also `d.copy()` /
+   `__copy__` did not preserve `maxlen`: `CommonListMethodsVariable.copy` routes
+   through `modified` -> `type(self)(items)` which drops `maxlen`.
+
+2. `random.random()` is a C `builtin_function_or_method` bound to the
+   module-global `random.Random` instance, unlike `randint`/`randrange`/
+   `uniform` (Python `MethodType`). `bound_builtin_method_descriptor` and the
+   `_wrap` MethodType branch only routed the Python-method helpers and the
+   `shuffle`/`sample`/`seed` mutators; `random.random` fell through to the
+   skipfile path and graph-broke ("Attempted to call function marked as
+   skipped: Random.random") under `error_on_graph_break=True`.
+
+Fix:
+- `torch/_dynamo/variables/lists.py` (`DequeVariable.call_method`): add a
+  `copy`/`__copy__` branch returning `DequeVariable(list(items),
+  maxlen=self.maxlen, ValueMutationNew())`, mirroring CPython `deque_copy`
+  (preserves maxlen) and validating 0 args/0 kwargs.
+- `torch/_dynamo/variables/user_defined.py`
+  (`UserDefinedClassVariable.call_method`): extend the existing defaultdict
+  `__copy__` branch to also cover `collections.deque`, dispatching
+  `deque.__copy__(d)` to the instance's `__copy__` method.
+- `torch/_dynamo/variables/builder.py` (`_wrap`): add a `BuiltinMethodType`
+  branch routing the module-global supported `random.random` through
+  `UserDefinedObjectVariable` so its existing `is_supported_random` /
+  `call_random_fn` / `RandomValueSource` path models the RNG value.
+
+Files changed:
+- `torch/_dynamo/variables/lists.py`
+- `torch/_dynamo/variables/user_defined.py`
+- `torch/_dynamo/variables/builder.py`
+- `test/dynamo/test_sequence_ops.py` (`TestSqConcat`:
+  `test_deque_copy_method`, `test_deque_copy_preserves_maxlen`,
+  `test_deque_copy_module`, `test_deque_copy_shares_elements`,
+  `test_deque_copy_too_many_args`)
+- `test/dynamo/test_unspec.py` (`UnspecTests.test_module_random_random_fullgraph`)
+
+Sentinels removed (working tree, uncommitted):
+- `CPython313-test_deque-TestBasic.test_copy` (target)
+- `CPython313-test_deque-TestBasic.test_reverse` (collateral; its body does
+  `data = [random.random() for i in range(n)]`, unblocked by the random.random
+  fix; verified failing-before / passing-after with the sentinel removed)
+
+Exact commands run and results (current tree):
+
+```bash
+# Target test, sentinel removed -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_deque.py TestBasic.test_copy
+# OK (1 test)
+
+# Collateral, sentinel removed -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_deque.py TestBasic.test_reverse
+# OK (1 test)
+
+# Whole affected CPython file -> PASS, no new failures / XPASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_deque.py
+# Ran 78 tests, OK (skipped=43)
+
+# New regression tests -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_sequence_ops.py -k deque_copy
+# Ran 5 tests, OK
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_unspec.py UnspecTests.test_module_random_random_fullgraph
+# OK (1 test)
+
+# Nearby Dynamo suites + random-touching CPython files -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_sequence_ops.py
+# Ran 138 tests, OK (expected failures=2, pre-existing)
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_unspec.py
+# Ran 61 tests, OK (skipped=1, expected failures=2)
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_functions.py
+# Ran 526 tests, OK (skipped=8, expected failures=2)
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_defaultdict.py
+# Ran 11 tests, OK (skipped=4) -- defaultdict __copy__ branch unaffected
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_sort.py
+# Ran 21 tests, OK (skipped=11) -- random.shuffle/seed routing unaffected
+```
+
+Risks: low. The deque `copy` branch is a focused new method handler. The
+`random.random` builder branch is gated on `is_supported_random_obj` and
+membership in `_supported_random_functions()`, so it only diverts the
+module-global C `random.random` to the already-exercised
+randint/randrange/uniform RNG path (verified no regression in unspec / sort /
+functions suites).
+
+Next gate: Cycle4-G.
+
+### Cycle4-G: test_dict.DictTest.test_items_symmetric_difference
+
+Status: DEFERRED. Classification (b): out-of-scope fundamental limitation
+(data-dependent branching on functionalized `random` values). The gate's
+hypothesis -- that the dict_items view does not model the set XOR /
+symmetric_difference operation -- is FALSE. The set-op machinery is already
+fully and correctly implemented; the blocker is unrelated control flow.
+
+What the test does (`test/cpython/v3_13/test_dict.py:804-812`):
+
+```python
+def test_items_symmetric_difference(self):
+    rr = random.randrange
+    for _ in range(100):
+        left = {x:rr(3) for x in range(20) if rr(2)}
+        right = {x:rr(3) for x in range(20) if rr(2)}
+        with self.subTest(left=left, right=right):
+            expected = set(left.items()) ^ set(right.items())
+            actual = left.items() ^ right.items()
+            self.assertEqual(actual, expected)
+```
+
+Repro evidence (sentinel temporarily moved aside):
+
+- Target under Dynamo surfaced as a masked `InternalTorchDynamoError:
+  IndentationError: expected an indented block...` raised from
+  `symbolic_convert.py:2005` (`print_readable` on an empty partial graph). That
+  is a secondary failure: it only runs inside the `hasattr(e, "msg") and
+  "Data-dependent" in e.msg` branch, i.e. the underlying error is
+  data-dependent. Walking the exception chain (`__cause__`/`__context__`)
+  revealed the real error:
+
+  ```
+  Unsupported: Data-dependent branching
+    The branch condition involves a tensor computed as follows:
+      ... left = {x:rr(3) for x in range(20) if rr(2)}
+      random_value_0: graph input (random_value_0)
+  ```
+
+- The dict-view set operation itself is NOT the problem. Minimal repros all
+  PASS with `torch.compile(backend="eager", fullgraph=True)`:
+  `left.items() ^ right.items()` over concrete dicts (including empty-dict edge
+  cases) returns the exact symmetric difference; `dict_keys`/`dict_items`
+  `__xor__`/`__and__`/`__or__`/`__sub__` and `nb_xor_impl`
+  (`symmetric_difference_update`) are implemented in
+  `torch/_dynamo/variables/dicts.py` (`DictViewVariable.nb_xor_impl` L1164,
+  `DictKeysVariable.call_method` L1241, `DictItemsVariable.call_method` L1415).
+
+- Root cause: inside a dict comprehension, `random.randrange` is functionalized
+  into a graph-input tensor (`random_value_0`) rather than constant-folded to a
+  Python int. The comprehension's `if rr(2)` filter then branches on that
+  tensor, which is data-dependent control flow -- fundamentally unsupported by
+  Dynamo. (A bare `x = random.randrange(2)` statement constant-folds to an int
+  and traces fine; only the comprehension-filter path functionalizes it.)
+
+This is the same class as Cycle3 G22 (DEFERRED: data-dependent sort over dynamic
+random values). Unblocking would require either routing comprehension-internal
+`random.randrange` to plain-int modeling, or data-dependent control-flow
+support -- both out of scope for a dict-view set-op gate and orthogonal to the
+gate's stated source areas.
+
+Files changed: none. No source fix, no regression test (dict-view set ops
+already have coverage and are correct).
+
+Sentinel: `CPython313-test_dict-DictTest.test_items_symmetric_difference` LEFT
+IN PLACE (restored). With it restored the target is correctly treated as an
+expected failure.
+
+Exact commands run and results:
+
+```bash
+# Target under Dynamo (sentinel moved aside) -> data-dependent (masked as IndentationError)
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 \
+  python test/cpython/v3_13/test_dict.py DictTest.test_items_symmetric_difference
+# FAILED (errors=1): InternalTorchDynamoError IndentationError ...
+#   underlying chain: Unsupported: Data-dependent branching (random_value_0 graph input)
+
+# dict_items XOR in isolation (fullgraph) -> PASS for concrete + empty dicts
+#   (left.items() ^ right.items() == set(left.items()) ^ set(right.items()))
+
+# Sentinel restored -> expected failure honored
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 \
+  python test/cpython/v3_13/test_dict.py DictTest.test_items_symmetric_difference
+# OK (skipped=1)
+```
+
+Risks: none (no code change). Note: the neighboring
+`test_dictview_mixed_set_operations` (L814, no `random`) exercises the same
+dict-view set ops over concrete values and is not an expected failure -- further
+evidence the set-op modeling is sound and the blocker is purely the `random`
+data-dependent filter.
+
+Next gate: Cycle4-H.
+
+### Cycle4-H: test_range.RangeTest.test_iterator_setstate
+
+Status: IMPLEMENTED (Cycle 4). Classification (a): genuine in-scope
+object-protocol gap. `range_iterator.__setstate__` is just an index setter (a
+method call), not pickle machinery, so modeling the method itself is in scope.
+Source fix in the working tree (uncommitted); target sentinel removed. No
+collateral sentinels.
+
+Root cause: `RangeIteratorVariable` did not implement `__setstate__`, so
+`it.__setstate__(2)` raised `Unsupported: Dynamo does not know how to trace
+method __setstate__ of class range_iterator` (gb0156). Additionally, the model
+tracked position by MUTATING `start` (advancing it) and DECREMENTING `len` per
+`next()`, with no explicit index, which could not faithfully implement setstate
+(the full length and origin are lost after partial iteration).
+
+Key semantic detail (caught in review): CPython `rangeiter_setstate`
+(Objects/rangeobject.c) is RELATIVE to the iterator's CURRENT advanced
+position, NOT an absolute index from the original start. It clamps the arg
+against the current remaining length, then does `r->start += arg*step;
+r->len -= arg`. So `it=iter(range(10)); next(it); next(it); it.__setstate__(7)`
+advances 7 more from index 2 -> index 9, leaving `[9]` (verified vs eager
+CPython 3.13), not `[7,8,9]`. An earlier draft treated the arg as an absolute
+index clamped to `[0, len]`; that passed the gate test only because the test
+calls `__setstate__` on FRESH iterators (index 0), where relative and absolute
+coincide.
+
+Fix: refactored `RangeIteratorVariable` to an index-model adaptation of
+`_PyRangeIterObject` (the real C struct mutates start/len in place and has no
+index field; the index model has equivalent observable behavior) -- keep
+`start`/`step`/`len` fixed and advance a mutable `index`. `tp_iternext_impl`
+yields `start + step*index` and increments `index` until `index >= len`
+(StopIteration). Added `RangeIteratorVariable.call_method` handling
+`__setstate__` (`remaining = len - index; index += min(max(arg, 0), remaining)`,
+i.e. clamp the arg against the CURRENT remaining length then advance; mirrors
+`rangeiter_setstate`) and `__length_hint__` (returns `len - index`; mirrors
+`rangeiter_len`). `reconstruct` emits `start + step*index` as the new range
+start so the rebuilt iterator resumes from the current position.
+
+Files changed:
+- `torch/_dynamo/variables/lists.py` (`RangeIteratorVariable.__init__`,
+  `tp_iternext_impl`, new `call_method`, `reconstruct`)
+- `test/dynamo/test_sequence_ops.py` (`TestRangeIteratorSetstate`:
+  `test_setstate_resumes_from_index`, `test_setstate_on_reversed`,
+  `test_setstate_negative_clamps_to_zero`,
+  `test_setstate_overshoot_clamps_to_len`,
+  `test_setstate_after_partial_consume`, `test_length_hint_tracks_index`;
+  all `fullgraph=True`)
+
+Sentinel removed (working tree, uncommitted):
+- `CPython313-test_range-RangeTest.test_iterator_setstate` (target)
+
+No collateral sentinels (no other range/iterator XPASS observed).
+
+Confirmed failure before change (sentinel temporarily removed):
+
+```bash
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_range.py \
+  RangeTest.test_iterator_setstate
+# -> Unsupported: Dynamo does not know how to trace method __setstate__ of
+#    class range_iterator (gb0156), at test_range.py:470 on it.__setstate__(2).
+```
+
+Exact commands run and results (current tree):
+
+```bash
+# Target test, sentinel removed -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_range.py \
+  RangeTest.test_iterator_setstate
+# OK (1 test)
+
+# Whole affected CPython file -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu PYTORCH_TEST_WITH_DYNAMO=1 \
+  pixi run -w pytorch -e pytorch313 python test/cpython/v3_13/test_range.py
+# Ran 28 tests, OK (skipped=11); no failures, no XPASS
+
+# New regression tests -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_sequence_ops.py \
+  TestRangeIteratorSetstate
+# Ran 6 tests, OK
+
+# Full sequence_ops suite -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_sequence_ops.py
+# Ran 144 tests, OK (expected failures=2, pre-existing)
+
+# Nearby Dynamo suite sanity -> PASS
+CUDA_VISIBLE_DEVICES= PYTORCH_TESTING_DEVICE_ONLY_FOR=cpu \
+  pixi run -w pytorch -e pytorch313 python test/dynamo/test_functions.py
+# Ran 526 tests, OK (skipped=8, expected failures=2)
+```
+
+Risks: low. The constructor signature is unchanged (`start, stop, step, len_`)
+so the two call sites (`RangeVariable.tp_iter_impl`, `__reversed__`) are
+unaffected; the index-based model is behaviorally identical for plain iteration
+(verified by full test_range.py + sequence_ops). `reconstruct` now resumes from
+the current position rather than the original start, which is strictly more
+correct (the previous code mutated `start` so it happened to reconstruct the
+right resume value; the new code computes it explicitly).
+
+Next gate: Cycle4-I (or per manager).
+
 ## Proposed Gate Changes Awaiting Human Approval
 
 Use this section only when an implementation subagent believes a gate is too
