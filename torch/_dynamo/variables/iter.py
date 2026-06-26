@@ -33,7 +33,7 @@ from ..exc import (
     raise_value_error,
     unimplemented,
 )
-from ..utils import raise_args_mismatch, unpack_iterable
+from ..utils import raise_args_mismatch, tracked_repr, unpack_iterable
 from .base import ValueMutationNew, VariableTracker
 from .constant import ConstantVariable
 from .hashable import HashableTracker
@@ -457,8 +457,6 @@ class RepeatIteratorVariable(IteratorVariable):
         return super().call_method(tx, name, args, kwargs)
 
     def repr_impl(self, tx: "InstructionTranslatorBase") -> VariableTracker:
-        from ..utils import tracked_repr
-
         item_repr = tracked_repr(tx, self.item)
         if self.times is None:
             return ConstantVariable.create(f"repeat({item_repr})")
