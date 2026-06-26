@@ -234,7 +234,7 @@ batched_apply_pivots_fused_kernel(
         A[idx2] = tmp;
       }
     }
-    __syncthreads();
+    //__syncthreads();
   }
 }
 
@@ -328,7 +328,7 @@ batched_panel_full_kernel(
         A[idx2] = tmp;
       }
     }
-    __syncthreads();
+    //__syncthreads();
 
     // 3. Scale (divide by diagonal - skip if zero for singular matrices)
     if (tid == 0) {
