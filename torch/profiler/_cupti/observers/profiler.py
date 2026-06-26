@@ -24,11 +24,9 @@ from torch.profiler._cupti.observers.base import (
     ObserverAnnotationSettings,
 )
 from torch.profiler._cupti.observers.observation_window import WindowFinalizerMixin
-from torch.profiler._cupti.pm_sampling import is_available as pm_is_available, PmSampler
 from torch.profiler._cupti.records import (
     Api,
     CudaEvent,
-    Environment,
     ExternalCorrelation,
     Field,
     Kernel,
@@ -164,14 +162,6 @@ PROFILER_FIELDS: dict[ActivityKind, set[Field]] = {
         Overhead.END,
         Overhead.CORRELATION_ID,
     },
-    # Periodically-sampled GPU environment (power/clock/thermal/cooling). Always on; rendered
-    # as counter tracks. DATA is the 20-byte metric union, split by ENVIRONMENT_KIND.
-    ActivityKind.ENVIRONMENT: {
-        Environment.DEVICE_ID,
-        Environment.TIMESTAMP,
-        Environment.ENVIRONMENT_KIND,
-        Environment.DATA,
-    },
 }
 
 
@@ -211,8 +201,6 @@ class ProfilerObserver(WindowFinalizerMixin, CuptiMonitorObserver):
         metadata_resolver: Callable[[int], str | None] | None = None,
         enable_cuda_sync: bool = False,
         defer_export: bool = True,
-        enable_pm_sampling: bool = False,
-        pm_sampling_interval_us: int = 1000,
     ) -> None:
         self._lock = threading.Lock()
         # Decoded activity kept COLUMNAR (frames of named numpy columns, not per-record
@@ -255,16 +243,6 @@ class ProfilerObserver(WindowFinalizerMixin, CuptiMonitorObserver):
                 poll_interval_ms=20,
                 thread_name="cupti-profiler-export",
                 auto_start_poller=defer_export,
-            )
-        # Opt-in PM sampling (true SM-active % + DRAM-throughput %): a dedicated poller whose
-        # decoded samples land as a "pm_sampling" timed frame, bucketed into the window like any
-        # other and rendered as GPU counter tracks. Off by default -- it locks GPU clocks.
-        self._pm_sampler: PmSampler | None = None
-        if enable_pm_sampling and self.available and pm_is_available():
-            self._pm_sampler = PmSampler(
-                self._pm_sink,
-                self.convert_time_array,
-                sampling_interval_ns=pm_sampling_interval_us * 1000,
             )
 
     def _boundary_clock_ns(self) -> int:
@@ -341,14 +319,6 @@ class ProfilerObserver(WindowFinalizerMixin, CuptiMonitorObserver):
 
     # --- async window API (the cupti_monitor profiler backend drives these) ----
 
-    def _pm_sink(self, frame: dict[str, Any]) -> None:
-        # Sink for PM-sampling decode (drained at close_window): append a converted sample frame
-        # as a timed "pm_sampling" frame, but only while a window is open/pending (else no window
-        # will consume it).
-        with self._lock:
-            if self._open_start is not None or self._windows:
-                self._timed_frames.append(("pm_sampling", frame))
-
     def open_window(self) -> None:
         """Start a trace window; records before this are excluded (no prepare-phase leak)."""
         # Capture the starting thread so its RUNTIME/DRIVER records map to the OS tid
@@ -356,18 +326,12 @@ class ProfilerObserver(WindowFinalizerMixin, CuptiMonitorObserver):
         self._record_calling_thread()
         with self._lock:
             self._open_start = self._boundary_clock_ns()
-        if self._pm_sampler is not None:
-            self._pm_sampler.start()
 
     def close_window(self) -> int | None:
         """End the open window and queue it for deferred export; snapshots its annotations +
         thread map now. Pair with :meth:`set_export` for the paths. Returns the window id."""
         if not self.available:
             return None
-        # Stop the PM poller first (it does a final tail decode): _open_start is still set, so
-        # those tail frames pass _pm_sink's active check and land in this window.
-        if self._pm_sampler is not None:
-            self._pm_sampler.stop()
         with self._lock:
             start = self._open_start if self._open_start is not None else 0
             self._open_start = None
@@ -400,8 +364,7 @@ class ProfilerObserver(WindowFinalizerMixin, CuptiMonitorObserver):
             if w is None:
                 return
             w["cpu"] = os.fspath(cpu_trace_path)
-            # Monitor traces are always gzipped (chrome JSON or .pftrace alike); the writer
-            # keys gzip + format off the suffix.
+            # Monitor traces are always gzipped; the writer keys gzip off the .gz suffix.
             out = os.fspath(output_path)
             w["out"] = out if out.endswith(".gz") else out + ".gz"
         self._maybe_write(window_id)
@@ -425,8 +388,6 @@ class ProfilerObserver(WindowFinalizerMixin, CuptiMonitorObserver):
                         self._boundaries
                     )  # stalled -> fall back to a forced drain
             self._stop_observation_window(sync=sync)
-        if self._pm_sampler is not None:
-            self._pm_sampler.stop()  # idempotent; covers a join without a close_window
         # Write on the foreground (here and in set_export), never the poll thread, so it
         # stays inside the caller's temp-dir lifetime.
         for window_id in list(self._windows):
@@ -776,19 +737,6 @@ def _cuda_event_columns(cols, convert, resolver):
     }
 
 
-def _environment_columns(cols, convert, resolver):
-    del resolver
-    # DATA is the union's first 8 bytes (u64): the primary metric pair (e.g. POWER ->
-    # power | powerLimit<<32, SPEED -> smClock | memoryClock<<32). Split by environment_kind
-    # in the consumer (monitor_trace) into the counter tracks.
-    return {
-        "start_ns": convert(cols[Environment.TIMESTAMP.id]),
-        "device_id": cols[Environment.DEVICE_ID.id].astype(np.int64),
-        "environment_kind": cols[Environment.ENVIRONMENT_KIND.id].astype(np.int64),
-        "data": cols[Environment.DATA.id].astype(np.uint64),
-    }
-
-
 # kind -> (chrome-trace tag, column builder, is_timed). Timed kinds bucket into windows;
 # untimed kinds (external_correlation, cuda_event) are join inputs that ride along.
 _COLUMN_BUILDERS: dict[int, tuple[str, Any, bool]] = {
@@ -806,5 +754,4 @@ _COLUMN_BUILDERS: dict[int, tuple[str, Any, bool]] = {
     int(ActivityKind.OVERHEAD): ("overhead", _overhead_columns, True),
     int(ActivityKind.SYNCHRONIZATION): ("cuda_sync", _sync_columns, True),
     int(ActivityKind.CUDA_EVENT): ("cuda_event", _cuda_event_columns, False),
-    int(ActivityKind.ENVIRONMENT): ("environment", _environment_columns, True),
 }
