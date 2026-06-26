@@ -750,6 +750,7 @@ void Graph::cloneFrom(Graph& src) {
         "Graph::copy() encountered a use of a value " + v->debugName() +
             " not in scope. Run lint!");
   };
+  all_values.reserve(all_values.size() + src.all_values.size());
   block()->cloneFrom(src.block(), env);
 }
 
