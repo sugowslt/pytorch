@@ -7,6 +7,9 @@ import torch
 __all__ = ["LinearCrossEntropyOptions"]
 
 
+_VALID_ACC_POLICIES = ("auto", "accurate", "compact")
+
+
 def _auto_acc_policy(device_type: str | None, dtype: torch.dtype) -> str:
     """Resolve the ``acc_policy`` ``"auto"`` sentinel from device and dtype.
 
@@ -136,10 +139,10 @@ class LinearCrossEntropyOptions:
     """
 
     def __post_init__(self):
-        if self.acc_policy not in {"auto", "accurate", "compact"}:
+        if self.acc_policy not in _VALID_ACC_POLICIES:
             raise ValueError(
-                f"invalid acc_policy: {self.acc_policy!r}; expected one of"
-                " 'auto', 'accurate', 'compact'"
+                f"invalid acc_policy: {self.acc_policy!r}; expected one of "
+                f"{', '.join(map(repr, _VALID_ACC_POLICIES))}"
             )
         if self.chunking_method is not None and self.chunking_method != "auto":
             name, sep, factor = self.chunking_method.partition(":")
