@@ -131,6 +131,7 @@ from .lists import (
 from .misc import (
     AutogradFunctionContextVariable,
     AutogradFunctionVariable,
+    CallMethodVariable,
     CellVariable,
     DeletedVariable,
     ExceptionVariable,
@@ -209,6 +210,7 @@ __all__ = [
     "BackwardHookVariable",
     "BaseBuiltinVariable",
     "BaseListVariable",
+    "CallMethodVariable",
     "BuiltinVariable",
     "CatchWarningsCtxManagerVariable",
     "CellVariable",
