@@ -3227,7 +3227,8 @@ class <lambda>(torch.nn.Module):
         getitem_1: "f32[4, 4]" = invoke_subgraph_6[0];  invoke_subgraph_6 = None
         add: "f32[4, 4]" = torch.ops.aten.add.Tensor(getitem, getitem_1);  getitem = getitem_1 = None
         sum_1: "f32[]" = torch.ops.aten.sum.default(add);  add = None
-        ones_like: "f32[]" = torch.ops.aten.ones_like.default(sum_1, pin_memory = False, memory_format = torch.preserve_format)
+        detach: "f32[]" = torch.ops.aten.detach.default(sum_1)
+        ones_like: "f32[]" = torch.ops.aten.ones_like.default(sum_1, pin_memory = False, memory_format = torch.preserve_format);  sum_1 = None
         expand: "f32[4, 4]" = torch.ops.aten.expand.default(ones_like, [4, 4]);  ones_like = None
         partitioned_bw_subgraph_0_1 = self.partitioned_bw_subgraph_0_0
         invoke_subgraph_7 = torch.ops.higher_order.invoke_subgraph(partitioned_bw_subgraph_0_1, 'partitioned_bw_subgraph_0_0', getitem_9, expand);  partitioned_bw_subgraph_0_1 = getitem_9 = None
@@ -3236,7 +3237,6 @@ class <lambda>(torch.nn.Module):
         invoke_subgraph_5 = torch.ops.higher_order.invoke_subgraph(partitioned_bw_subgraph_0_0, 'partitioned_bw_subgraph_0_0', getitem_8, expand);  partitioned_bw_subgraph_0_0 = getitem_8 = expand = None
         getitem_6: "f32[4, 4]" = invoke_subgraph_5[1];  invoke_subgraph_5 = None
         add_1: "f32[4, 4]" = torch.ops.aten.add.Tensor(getitem_3, getitem_6);  getitem_3 = getitem_6 = None
-        detach: "f32[]" = torch.ops.aten.detach.default(sum_1);  sum_1 = None
         return (detach, add_1)
     class repeated_subgraph0(torch.nn.Module):
         def forward(self, arg0_1: "f32[4, 4]", arg1_1: "f32[4, 4]"):
