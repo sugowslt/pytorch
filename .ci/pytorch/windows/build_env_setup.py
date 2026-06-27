@@ -44,6 +44,12 @@ COMMON_BUILD_ENV: dict[str, str] = {
     "INSTALL_TEST": "0",
     "MSSdk": "1",
     "DISTUTILS_USE_SDK": "1",
+    # Use Ninja for all Windows binary builds. setup.py defaulted to Ninja
+    # whenever it was on PATH; scikit-build-core instead defaults to the Visual
+    # Studio generator, under which the oneDNN-XPU ExternalProject's
+    # -DCMAKE_CXX_COMPILER=icx is ignored (VS selects the compiler by toolset),
+    # so oneDNN configures with MSVC and fails its -fsycl driver check.
+    "CMAKE_GENERATOR": "Ninja",
 }
 
 
@@ -57,7 +63,6 @@ CPU_BUILD_ENV: dict[str, str] = {
 CUDA_BUILD_ENV_STATIC: dict[str, str] = {
     "USE_CUDA": "1",
     "TORCH_NVCC_FLAGS": "-Xfatbin -compress-all",
-    "CMAKE_GENERATOR": "Ninja",
 }
 
 
