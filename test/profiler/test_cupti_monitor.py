@@ -1288,7 +1288,15 @@ _cupti_monitor.enable_hes_early()
             if HES:
                 assert not torch.cuda.is_initialized(), "CUDA context exists before HES arm"
                 from torch.profiler._cupti import monitor as _cupti_monitor
-                _cupti_monitor.enable_hes_early()
+                from torch.profiler._cupti.cupti_python import CuptiError
+                try:
+                    _cupti_monitor.enable_hes_early()
+                except CuptiError as e:
+                    # HES is unsupported on this platform (cuptiActivityEnableHWTrace
+                    # -> CUPTI_ERROR_NOT_SUPPORTED): skip the HES leg of the parity check.
+                    if "CUPTI_ERROR_NOT_SUPPORTED" not in str(e):
+                        raise
+                    print("SKIP_HES"); raise SystemExit(0)
                 if not _cupti_monitor.is_hes_enabled():
                     print("SKIP_HES"); raise SystemExit(0)
 
