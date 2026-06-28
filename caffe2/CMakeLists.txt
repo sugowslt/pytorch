@@ -1207,16 +1207,12 @@ if(USE_XPU)
       target_compile_definitions(torch_xpu PUBLIC USE_C10D_XCCL)
     endif()
     target_link_libraries(torch_xpu PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,torch_xpu_ops>)
-    # On Windows with BUILD_SEPARATE_OPS=ON, TORCH_XPU_OPS_LIBRARIES contains
-    # individual kernel DLL targets (populated by torch-xpu-ops BuildOnWindows.cmake).
-    # STATIC torch_xpu_ops does not forward PUBLIC dependencies transitively on
-    # Windows PE/COFF, so we explicitly link them here for torch_xpu.dll to resolve
-    # cross-kernel symbols at link time.
-    # torch_xpu_ops is already linked via WHOLE_ARCHIVE above; exclude it to avoid
-    # cmake 4.x "same target with different features" error.
-    set(_xpu_extra_libs ${TORCH_XPU_OPS_LIBRARIES})
-    list(REMOVE_ITEM _xpu_extra_libs torch_xpu_ops)
-    target_link_libraries(torch_xpu PRIVATE ${_xpu_extra_libs})
+    # torch_xpu needs xpu_hal for registerXPUGeneratorBridge() at init time.
+    # On BUILD_SEPARATE_OPS=ON, xpu_hal is a SHARED DLL in torch-xpu-ops;
+    # on OFF, it is STATIC and compiled into torch_xpu_ops (already linked).
+    if(TARGET xpu_hal)
+      target_link_libraries(torch_xpu PRIVATE xpu_hal)
+    endif()
 
     # Set cached ${ATen_XPU_INCLUDE_DIRS} to torch
     include_directories(SYSTEM ${ATen_XPU_INCLUDE_DIRS})
