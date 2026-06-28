@@ -47,6 +47,22 @@ void initXPUGenVector() {
               at::xpu::philox::unpack(xpu_gen->philox_xpu_state(increment));
           return {seed, offset};
         });
+    // philoxCaptureState bridge — passes through raw pointers for
+    // graph capture (Attention.cpp needs the extragraph buffer
+    // addresses rather than unpacked values).
+    xpu_hal::registerXPUGeneratorCaptureBridge(
+        [](c10::GeneratorImpl* gen, uint64_t increment)
+            -> xpu_hal::PhiloxCaptureState {
+          auto* xpu_gen = static_cast<at::XPUGeneratorImpl*>(gen);
+          auto native_state = xpu_gen->philox_xpu_state(increment);
+          xpu_hal::PhiloxCaptureState result;
+          if (native_state.captured_) {
+            result.seed_ptr = native_state.seed_.ptr;
+            result.offset_ptr = native_state.offset_.ptr;
+            result.offset_intragraph = native_state.offset_intragraph_;
+          }
+          return result;
+        });
     return true;
   }();
 }
