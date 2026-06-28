@@ -77,10 +77,9 @@ struct LUWorkspace {
     int n = cuda_int_cast(input.size(-1), "input.size(-1)");
 
     // Pointer arrays for cuBLAS batched TRSM (64-bit addresses)
-    buffer = at::empty({4, batch_count}, input.options().dtype(at::kLong));
+    buffer = at::empty({2, batch_count}, input.options().dtype(at::kLong));
     dL11_array = static_cast<scalar_t**>(buffer.select(0, 0).data_ptr());
     dA12_array = static_cast<scalar_t**>(buffer.select(0, 1).data_ptr());
-    dSwap_array = static_cast<scalar_t**>(buffer.select(0, 2).data_ptr());
 
     // Permutation vector workspace: m ints per batch
     pivinfo_buffer = at::empty({batch_count, m}, input.options().dtype(at::kInt));
@@ -99,7 +98,6 @@ struct LUWorkspace {
   Tensor buffer;
   scalar_t** dL11_array;
   scalar_t** dA12_array;
-  scalar_t** dSwap_array;  // points into swap_buf for TRSM input
 
   // Permutation workspace
   Tensor pivinfo_buffer;
