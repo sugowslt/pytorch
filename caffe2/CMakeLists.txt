@@ -1168,19 +1168,28 @@ if(USE_XPU)
       message(FATAL_ERROR "Fail to clone ${TORCH_XPU_OPS_REPO_URL}")
     endif()
   endif()
+  # Check if already at the right commit to skip unnecessary git operations
   execute_process(
-    COMMAND git fetch --quiet
+    COMMAND git rev-parse HEAD
     WORKING_DIRECTORY ${TORCH_XPU_OPS_DIR}
-    RESULT_VARIABLE _exitcode)
-  if(NOT _exitcode EQUAL 0)
-    message(FATAL_ERROR "Fail to fetch ${TORCH_XPU_OPS_REPO_URL}")
-  endif()
-  execute_process(
-    COMMAND git checkout --quiet ${TORCH_XPU_OPS_COMMIT}
-    WORKING_DIRECTORY ${TORCH_XPU_OPS_DIR}
-    RESULT_VARIABLE _exitcode)
-  if(NOT _exitcode EQUAL 0)
-    message(FATAL_ERROR "Fail to checkout ${TORCH_XPU_OPS_REPO_URL} to ${TORCH_XPU_OPS_COMMIT}")
+    OUTPUT_VARIABLE _current_commit
+    RESULT_VARIABLE _exitcode
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _exitcode EQUAL 0 OR NOT _current_commit STREQUAL TORCH_XPU_OPS_COMMIT)
+    execute_process(
+      COMMAND git fetch --quiet
+      WORKING_DIRECTORY ${TORCH_XPU_OPS_DIR}
+      RESULT_VARIABLE _exitcode)
+    if(NOT _exitcode EQUAL 0)
+      message(FATAL_ERROR "Fail to fetch ${TORCH_XPU_OPS_REPO_URL}")
+    endif()
+    execute_process(
+      COMMAND git checkout --quiet ${TORCH_XPU_OPS_COMMIT}
+      WORKING_DIRECTORY ${TORCH_XPU_OPS_DIR}
+      RESULT_VARIABLE _exitcode)
+    if(NOT _exitcode EQUAL 0)
+      message(FATAL_ERROR "Fail to checkout ${TORCH_XPU_OPS_REPO_URL} to ${TORCH_XPU_OPS_COMMIT}")
+    endif()
   endif()
 
   set(TORCH_XPU_OPS_INCLUDE_DIRS
